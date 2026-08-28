@@ -1,0 +1,60 @@
+/* Sidebar/topbar chrome + shared badge/dropdown styles used across both the
+   legacy Alpro-framework pages and the "modern" pages - loaded by
+   aap_sidebar.php, included on every AAP page. */
+
+select.alpro-input {
+    height: auto !important;
+    min-height: 38px !important;
+    padding-top: 8px !important;
+    padding-bottom: 8px !important;
+    line-height: 1.5 !important;
+}
+
+/* Status / tier badges */
+.alpro-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 3px 10px;
+    border-radius: 50px;
+    font-weight: bold;
+    font-size: 11px;
+    color: #fff;
+    white-space: nowrap;
+}
+.alpro-badge-investigating    { background: #b8860b; }
+.alpro-badge-confirming       { background: #f39c12; }
+.alpro-badge-pending_approval { background: #fd7e14; }
+.alpro-badge-executing        { background: #16a085; }
+.alpro-badge-closed    { background: #7f8c8d; }
+.alpro-badge-rejected  { background: #e74c3c; }
+.alpro-badge-voided    { background: #95a5a6; }
+.alpro-badge-pending   { background: #f39c12; }
+.alpro-badge-approved  { background: #27ae60; }
+.alpro-badge-manager   { background: #8e44ad; }
+.alpro-badge-executive { background: #2980b9; }
+
+.dropdown { position: relative; display: inline-block; }
+.dropdown-content {
+    display: none;
+    position: absolute;
+    background-color: #ffffff;
+    min-width: 200px;
+    box-shadow: 0px 8px 16px 0px rgba(0,0,0,0.1);
+    z-index: 1000;
+    border-radius: 4px;
+    border: 1px solid #ddd;
+    top: 100%;
+    left: 0;
+}
+.dropdown-content a {
+    color: #333;
+    padding: 10px 15px;
+    text-decoration: none;
+    display: block;
+    font-size: 13px;
+    border-bottom: 1px solid #eee;
+}
+.dropdown-content a:last-child { border-bottom: none; }
+.dropdown-content a:hover { background-color: #f9f9f9; color: #2980b9; }
+.dropdown:hover .dropdown-content { display: block; }

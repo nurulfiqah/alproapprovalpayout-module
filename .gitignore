@@ -1,0 +1,13 @@
+# Sensitive config (contains NAS credentials)
+nas_config.php
+lib/synologynas.php
+
+# Uploaded files
+/uploads/*
+!/uploads/.gitkeep
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

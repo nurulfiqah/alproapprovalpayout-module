@@ -1,0 +1,286 @@
+/* AAP "modern" (OKR-style) look — opt-in per page via <div class="aap-modern">.
+   Scoped so it never bleeds into the shared ODB chrome or the module's own
+   legacy Alpro-framework pages that don't wrap their content in .aap-modern. */
+
+.aap-modern, .aap-modern * { font-family: "Inter", sans-serif; box-sizing: border-box; }
+.aap-modern { text-align: left; margin-top: 15px; }
+
+/* Horizontal step progress tracker — shows where a case sits in the SOP
+   (Raised -> Physical Confirm -> Approval -> Execution -> Closed). */
+.aap-stepper { display: flex; align-items: flex-start; margin-bottom: 0; }
+.aap-step { flex: 1; position: relative; text-align: center; }
+.aap-step::before {
+    content: ''; position: absolute; top: 11px; left: -50%; width: 100%; height: 2px;
+    background: #dee2e6; z-index: 0;
+}
+.aap-step:first-child::before { display: none; }
+.aap-step-circle {
+    width: 22px; height: 22px; border-radius: 50%; margin: 0 auto;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 700; background: #fff; border: 2px solid #dee2e6;
+    color: #adb5bd; position: relative; z-index: 1;
+}
+.aap-step-label { margin-top: 5px; font-size: 11px; font-weight: 600; color: #6c757d; }
+.aap-step-sub { font-size: 9px; color: #0d6efd; margin-top: 0; font-weight: 600; }
+
+.aap-step.done::before, .aap-step.current::before, .aap-step.failed::before { background: #198754; }
+.aap-step.done .aap-step-circle { background: #198754; border-color: #198754; color: #fff; }
+.aap-step.done .aap-step-label { color: #198754; }
+
+.aap-step.current .aap-step-circle { background: #0d6efd; border-color: #0d6efd; color: #fff; box-shadow: 0 0 0 3px rgba(13,110,253,.15); }
+.aap-step.current .aap-step-label { color: #0d6efd; }
+
+.aap-step.failed .aap-step-circle { background: #dc3545; border-color: #dc3545; color: #fff; }
+.aap-step.failed .aap-step-label { color: #dc3545; }
+.aap-step.failed .aap-step-sub { color: #dc3545; }
+
+.aap-step.upcoming .aap-step-circle { background: #fff; border-color: #dee2e6; color: #adb5bd; }
+
+.aap-page-title-row { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
+.aap-page-title { font-size: 20px; font-weight: 600; color: #212529; margin: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.aap-page-title i { color: #0a5aa8; }
+.aap-page-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+.aap-pill { display: inline-block; font-size: 12px; font-weight: 600; padding: 3px 12px; border-radius: 12px; color: #fff; vertical-align: middle; white-space: nowrap; }
+.aap-pill-investigating { background: #b8860b; }
+.aap-pill-confirming { background: #f39c12; }
+.aap-pill-pending_approval { background: #fd7e14; }
+.aap-pill-executing { background: #0dcaf0; color: #04323c; }
+.aap-pill-closed { background: #6c757d; }
+.aap-pill-rejected { background: #dc3545; }
+.aap-pill-voided { background: #adb5bd; }
+.aap-pill-pending { background: #fd7e14; }
+.aap-pill-approved { background: #198754; }
+.aap-pill-corrected { background: #6610f2; }
+.aap-pill-executive { background: #0d6efd; }
+.aap-pill-manager { background: #6610f2; }
+
+.aap-bento { display: grid; grid-template-columns: repeat(12, 1fr); gap: 1rem; align-items: stretch; }
+.aap-bento-item { grid-column: span 12; min-width: 0; }
+.aap-span-9 { grid-column: span 9; }
+.aap-span-8 { grid-column: span 8; }
+.aap-span-4 { grid-column: span 4; }
+.aap-span-3 { grid-column: span 3; }
+.aap-span-12 { grid-column: span 12; }
+@media (max-width: 900px) { .aap-span-9, .aap-span-8, .aap-span-4, .aap-span-3 { grid-column: span 12; } }
+
+.aap-card-empty { background: #fbfcfd; border: 1px dashed #dee2e6; box-shadow: none; min-height: 90px; }
+
+.aap-card { background: #fff; border-radius: 10px; padding: 1.25rem; box-shadow: 0 1px 3px rgba(0,0,0,0.08); border: 1px solid #e9ecef; text-align: left; height: 100%; }
+.aap-card-title-row { display: flex; justify-content: space-between; align-items: center; padding-bottom: 10px; border-bottom: 1px solid #e9ecef; margin-bottom: 14px; flex-wrap: wrap; gap: 8px; }
+.aap-card-title { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600; color: #212529; margin: 0; padding-bottom: 10px; border-bottom: 1px solid #e9ecef; }
+.aap-card-title-row .aap-card-title { padding-bottom: 0; border-bottom: none; }
+.aap-card-title i { color: #0a5aa8; font-size: 16px; }
+.aap-card-hint { font-size: 12px; color: #6c757d; margin: 6px 0 14px; }
+.aap-req { color: #dc3545; }
+.aap-fixit-card { background: #eaf3ff !important; border: 1px solid #cfe3fb !important; }
+.aap-fixit-card .aap-card-title i { color: #1a5fa8; }
+
+.aap-modern .alpro-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px 18px; align-items: start; }
+.aap-modern .alpro-field { min-width: 0; }
+.aap-modern .alpro-field label { display: block; font-size: 11px; font-weight: 600; color: #6c757d; text-transform: uppercase; letter-spacing: .03em; margin-bottom: 4px; }
+.aap-modern .alpro-field > div { font-size: 14px; color: #212529; }
+
+.aap-modern .alpro-input { border: 1px solid #dcdfe3; border-radius: 8px; padding: 8px 12px; font-size: 14px; width: 100%; transition: border-color .15s, box-shadow .15s; }
+.aap-modern .alpro-input:focus { outline: none; border-color: #0d6efd; box-shadow: 0 0 0 3px rgba(13,110,253,.12); }
+
+.aap-modern .alpro-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.aap-modern .alpro-actions .alpro-btn { flex: 1 1 140px; justify-content: center; white-space: nowrap; }
+
+.aap-modern .alpro-btn { border: none; border-radius: 8px; padding: 9px 18px; font-size: 13px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.aap-modern .alpro-btn-blue { background: #0d6efd; color: #fff; }
+.aap-modern .alpro-btn-blue:hover { background: #0b5ed7; }
+.aap-modern .alpro-btn-orange { background: #fd7e14; color: #fff; }
+.aap-modern .alpro-btn-orange:hover { background: #e56c0a; }
+.aap-modern .alpro-btn-grey { background: #f1f3f5; color: #495057; }
+.aap-modern .alpro-btn-grey:hover { background: #e9ecef; }
+
+.aap-modern .alpro-alert { border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-bottom: 16px; }
+.aap-modern .alpro-success { background: #e6f6ed; color: #146c37; border: 1px solid #b7e4c7; }
+.aap-modern .alpro-danger { background: #fdeceb; color: #a52a20; border: 1px solid #f5c6c0; }
+.aap-modern .alpro-warn { background: #fff6e5; color: #8a5a00; border: 1px solid #ffe0a3; }
+
+.aap-modern table.alpro-table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 13px; }
+.aap-modern table.alpro-table th { background: #f8f9fa !important; color: #495057; text-transform: uppercase; font-size: 11px; letter-spacing: .03em; padding: 10px; text-align: left; border-bottom: 1px solid #e9ecef; }
+.aap-modern table.alpro-table td { padding: 10px; border-bottom: 1px solid #f1f3f5; }
+.aap-modern table.alpro-table tr:last-child td { border-bottom: none; }
+
+.aap-attach-list { list-style: none; margin: 14px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.aap-attach-list li { font-size: 13px; padding: 8px 10px; background: #f8f9fa; border-radius: 6px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.aap-meta-line { font-size: 12px; color: #6c757d; margin: 4px 0 0; }
+
+.aap-empty-state { font-size: 12px; color: #adb5bd; font-style: italic; padding: 6px 0; }
+
+/* Small "why" info icon with a hover tooltip (e.g. next to the Tier pill) */
+.aap-info-icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 15px; height: 15px; border-radius: 50%;
+    background: #e9ecef; color: #6c757d;
+    font-size: 10px; font-weight: 700; font-style: normal;
+    cursor: help; position: relative; margin-left: 5px; vertical-align: middle;
+}
+.aap-info-icon:hover { background: #0d6efd; color: #fff; }
+.aap-info-icon .aap-tooltip {
+    visibility: hidden; opacity: 0; position: absolute; bottom: 135%; left: 50%;
+    transform: translateX(-50%); background: #212529; color: #fff;
+    font-size: 11px; font-weight: 400; text-transform: none; letter-spacing: normal;
+    padding: 8px 10px; border-radius: 6px; width: 230px; line-height: 1.45;
+    z-index: 30; transition: opacity .15s; pointer-events: none; text-align: left;
+}
+.aap-info-icon .aap-tooltip::after {
+    content: ''; position: absolute; top: 100%; left: 50%; margin-left: -5px;
+    border-width: 5px; border-style: solid; border-color: #212529 transparent transparent transparent;
+}
+.aap-info-icon:hover .aap-tooltip { visibility: visible; opacity: 1; }
+
+/* Activity / audit timeline (mirrors OKR's .okr-activity-*) */
+.aap-activity-list { max-height: 320px; overflow-y: auto; }
+.aap-activity-row { border-left: 3px solid #dee2e6; padding: 4px 0 4px 12px; margin-bottom: 10px; text-align: left; }
+.aap-activity-row:last-child { margin-bottom: 0; }
+.aap-activity-event { font-size: 11px; font-weight: 600; color: #0a5aa8; text-transform: uppercase; letter-spacing: .03em; }
+.aap-activity-summary { font-size: 13px; color: #212529; margin-top: 1px; }
+.aap-activity-meta { font-size: 11px; color: #6c757d; margin-top: 3px; }
+
+/* Short key/value facts (e.g. the Fixit report card's Category/Department/
+   Outlet/Lodged By row) — hug their content instead of stretching into a
+   4-column grid that leaves huge gaps when the card is wide. */
+.aap-fact-row { display: flex; flex-wrap: wrap; gap: 18px 40px; margin-bottom: 14px; }
+.aap-fact-row .alpro-field { flex: 0 1 auto; }
+.aap-fact-block + .aap-fact-block { margin-top: 12px; }
+
+/* ===================== index.php ===================== */
+.aap-module-tag { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; font-size: 12px; font-weight: 700; color: #0d6efd; text-transform: uppercase; letter-spacing: .04em; }
+.aap-stats { display: flex; gap: 16px; margin: 14px 0 20px; flex-wrap: wrap; }
+.aap-stat { background: #fff; padding: 16px 18px; border-radius: 8px; flex: 1; min-width: 160px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border-top: 4px solid #3498db; }
+.aap-stat h3 { margin: 0 0 8px; color: #7f8c8d; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+.aap-stat .value { font-size: 24px; font-weight: bold; color: #2c3e50; }
+.aap-stat.red { border-top-color: #e74c3c; }
+
+.aap-tabs { display: flex; gap: 6px; border-bottom: 2px solid #e5e9ec; margin-bottom: 0; }
+.aap-tab-btn {
+    border: none; background: none; cursor: pointer; padding: 10px 18px 12px;
+    font-size: 14px; font-weight: 600; color: #7f8c8d;
+    display: inline-flex; align-items: center; gap: 8px;
+    border-bottom: 3px solid transparent; margin-bottom: -2px;
+}
+.aap-tab-btn:hover { color: #2c3e50; }
+.aap-tab-btn.active { color: #2980b9; border-bottom-color: #2980b9; }
+.aap-tab-count { display: inline-block; min-width: 20px; padding: 1px 7px; border-radius: 10px; background: #eef1f3; color: #7f8c8d; font-size: 11px; font-weight: 700; }
+.aap-tab-btn.active .aap-tab-count { background: #2980b9; color: #fff; }
+.aap-tab-count.red { background: #fdeceb; color: #e74c3c; }
+.aap-tab-btn.active .aap-tab-count.red { background: #e74c3c; color: #fff; }
+.aap-tab-panel { display: none; }
+.aap-tab-panel.active { display: block; }
+
+.aap-filter-compact .alpro-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px 12px; }
+.aap-filter-compact .alpro-field label { font-size: 10px; margin-bottom: 2px; }
+.aap-filter-compact .alpro-input { padding: 4px 8px; font-size: 12px; height: auto; min-height: 0; line-height: 1.2; }
+.aap-filter-compact select.alpro-input {
+    min-height: 0 !important;
+    height: auto !important;
+    padding-top: 4px !important;
+    padding-bottom: 4px !important;
+    line-height: 1.2 !important;
+}
+.aap-filter-compact .alpro-btn { padding: 4px 12px; font-size: 12px; }
+.aap-filter-compact .alpro-actions { flex-wrap: nowrap; justify-self: end; margin-left: auto; }
+.aap-filter-compact .alpro-actions .alpro-btn { flex: 0 0 auto; white-space: nowrap; }
+
+/* ===================== aap_add.php ===================== */
+/* aap_sidebar.php's select.alpro-input rule uses !important, which beats
+   a plain inline style - these need !important too to actually win. */
+#department_id_filter, #case_type_id {
+    height: 38px !important;
+    min-height: 38px !important;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+    line-height: 38px !important;
+}
+
+/* ===================== aap_settings.php ===================== */
+.sa-pager { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-top:12px; padding-top:12px; border-top:1px solid #e9ecef; font-size:12px; color:#6c757d; }
+.sa-pager-bar { display:flex; gap:4px; }
+.sa-pager-btn { border:1px solid #dcdfe3; background:#fff; color:#495057; border-radius:4px; padding:3px 9px; font-size:11px; cursor:pointer; }
+.sa-pager-btn.active { background:#0d6efd; border-color:#0d6efd; color:#fff; }
+.sa-pager-btn:disabled { opacity:.4; cursor:default; }
+.sa-filter-form .alpro-input { padding:4px 8px !important; min-height:0 !important; height:auto !important; font-size:12px; line-height:1.3 !important; }
+.sa-filter-form .alpro-btn { padding:4px 12px !important; font-size:12px !important; }
+.aap-sa-list-table th, .aap-sa-list-table td { padding: 5px 10px !important; font-size: 12px; }
+.aap-sa-list-table .alpro-badge { padding: 1px 8px; font-size: 10px; }
+.aap-sa-list-table .alpro-btn { padding: 3px 8px !important; font-size: 11px !important; }
+
+/* ===================== aap_admin.php ===================== */
+.aap-admin-info-icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 15px; height: 15px; border-radius: 50%;
+    background: #e9ecef; color: #6c757d;
+    font-size: 10px; font-weight: 700; font-style: normal;
+    cursor: help; position: relative; margin-left: 5px; vertical-align: middle;
+}
+.aap-admin-info-icon:hover { background: #0d6efd; color: #fff; }
+.aap-admin-tooltip {
+    visibility: hidden; opacity: 0; position: absolute; bottom: 135%; left: 50%;
+    transform: translateX(-50%); background: #212529; color: #fff;
+    font-size: 11px; font-weight: 400; text-transform: none; letter-spacing: normal;
+    padding: 8px 10px; border-radius: 6px; width: 230px; line-height: 1.45;
+    z-index: 30; transition: opacity .15s; pointer-events: none; text-align: left;
+}
+.aap-admin-tooltip::after {
+    content: ''; position: absolute; top: 100%; left: 50%; margin-left: -5px;
+    border-width: 5px; border-style: solid; border-color: #212529 transparent transparent transparent;
+}
+.aap-admin-info-icon:hover .aap-admin-tooltip { visibility: visible; opacity: 1; }
+
+/* Add/Edit Case Type — stacked "label left, control right" rows instead
+   of the grid-table layout used elsewhere in this admin page. */
+.aap-ct-card { background: #fff; border-radius: 10px; padding: 24px 28px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); border: 1px solid #e9ecef; text-align: left; }
+.aap-ct-card h3 { margin: 0 0 18px; font-size: 17px; font-weight: 700; color: #212529; text-align: left; }
+/* Editing an existing Case Type - tinted so it's visually distinct from the
+   Add form. */
+.aap-ct-card-editing { background: #eef5ff; border-color: #bcd8f9; }
+.aap-ct-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 32px; }
+.aap-ct-row { display: flex; align-items: flex-start; gap: 14px; padding: 3px 0; }
+.aap-ct-row.aap-ct-full { grid-column: 1 / -1; }
+.aap-ct-row label { width: 160px; flex-shrink: 0; font-weight: 600; color: #343a40; padding-top: 5px; text-align: left; font-size: 13px; }
+.aap-ct-control { flex: 1; min-width: 0; }
+.aap-ct-control .alpro-input {
+    width: 100%;
+    padding: 4px 8px !important;
+    min-height: 0 !important;
+    height: auto !important;
+    font-size: 13px;
+    line-height: 1.3 !important;
+}
+.aap-ct-control-inline { display: flex; align-items: center; gap: 8px; padding-top: 5px; }
+@media (max-width: 700px) { .aap-ct-grid { grid-template-columns: 1fr; } }
+
+/* Level 1/2/3 grouping - each level is its own grid row, fields stacked
+   label-above-input (rather than the label-left layout above) since
+   these rows pack 3-4 fields side by side. */
+.aap-ct-level { display: grid; gap: 14px; margin-bottom: 16px; }
+.aap-ct-level-1 { grid-template-columns: repeat(4, 1fr); }
+.aap-ct-level-2 { grid-template-columns: 1fr 1fr; }
+.aap-ct-level-2 #ct_approver_mode, .aap-ct-level-2 #ct_ops_tier_required { max-width: 340px; }
+.aap-ct-level-2 #ct_pool_staff_field { grid-column: 1 / -1; flex-direction: row; gap: 20px; }
+.aap-ct-level-2 #ct_pool_staff_field > div { flex: 1; min-width: 0; margin-bottom: 0; }
+.ct-pool-row > span:first-child { min-width: 140px; white-space: nowrap; }
+@media (max-width: 700px) { .aap-ct-level-2 { grid-template-columns: 1fr; } .aap-ct-level-2 #ct_pool_staff_field { flex-direction: column; } }
+.aap-ct-level-3 { grid-template-columns: repeat(2, 1fr); }
+.aap-ct-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.aap-ct-field label { font-weight: 600; color: #343a40; font-size: 13px; }
+.aap-ct-field .alpro-input { width: 100%; padding: 4px 8px !important; min-height: 0 !important; height: auto !important; font-size: 13px; line-height: 1.3 !important; }
+.aap-ct-field-inline { display: flex; align-items: center; gap: 8px; padding-top: 2px; }
+.aap-ct-level-title { font-size: 11px; font-weight: 700; color: #6c757d; text-transform: uppercase; letter-spacing: .04em; margin: 0 0 8px; }
+@media (max-width: 900px) { .aap-ct-level-1, .aap-ct-level-3 { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 560px) { .aap-ct-level-1, .aap-ct-level-3 { grid-template-columns: 1fr; } }
+
+.aap-ct-list-table th, .aap-ct-list-table td { padding: 5px 10px !important; font-size: 12px; }
+.aap-ct-list-table .alpro-badge { padding: 1px 8px; font-size: 10px; }
+.aap-ct-list-table .alpro-btn { padding: 3px 8px !important; font-size: 11px !important; }
+
+/* ===================== aap_access.php ===================== */
+.aap-access-section { margin-bottom: 20px; }
+.aap-access-section h6 { display: flex; align-items: center; gap: 8px; }
+.aap-access-note { background: #fff6e5; color: #8a5a00; border: 1px solid #ffe0a3; border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-bottom: 20px; }
+table.aap-access-table th, table.aap-access-table td { vertical-align: top; }
+table.aap-access-table code { background: #f1f3f5; padding: 1px 6px; border-radius: 4px; font-size: 12px; }
