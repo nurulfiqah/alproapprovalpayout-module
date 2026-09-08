@@ -8,6 +8,15 @@
 $current_page = basename($_SERVER['PHP_SELF']);
 $aap_base = $aap_base ?? '';
 $admin_prefix = ($aap_base === '') ? 'admin/' : '';
+// Admin ("Admin 2"/SuperAdmin) vs general aapIsAdmin ("Admin 1"):
+// aap_grouping_master.php (Approval Unit Master), aap_settings.php (grants
+// staff.aap itself), and aap_staff_assignments.php (looks up ANY staff
+// member's assignments across every department) are all SuperAdmin-only -
+// their nav links are hidden from a general admin who isn't also a
+// SuperAdmin, even though Settings (Case Type Registry) stays visible to
+// any $aap_is_admin.
+$aap_is_superadmin_nav = $aap_is_superadmin_nav ?? $aap_is_superadmin
+    ?? (function_exists('aapFetchIsSuperAdmin') && isset($conn, $id_user) ? aapFetchIsSuperAdmin($conn, $id_user) : false);
 ?>
 <link rel="stylesheet" href="<?php echo $aap_base; ?>../common/css/layout.css">
 <link rel="stylesheet" href="<?php echo $aap_base; ?>../common/css/page.css">
@@ -25,7 +34,11 @@ $admin_prefix = ($aap_base === '') ? 'admin/' : '';
 
         <?php if (!empty($aap_is_admin)): ?>
         <a href="<?php echo $admin_prefix; ?>aap_admin.php" class="alpro-btn <?php echo ($current_page == 'aap_admin.php') ? 'alpro-btn-orange' : 'alpro-btn-grey'; ?>" style="text-decoration: none;">Settings</a>
+        <?php endif; ?>
+        <?php if ($aap_is_superadmin_nav): ?>
+        <a href="<?php echo $admin_prefix; ?>aap_grouping_master.php" class="alpro-btn <?php echo ($current_page == 'aap_grouping_master.php') ? 'alpro-btn-orange' : 'alpro-btn-grey'; ?>" style="text-decoration: none;">Approval Units</a>
         <a href="<?php echo $admin_prefix; ?>aap_settings.php" class="alpro-btn <?php echo ($current_page == 'aap_settings.php') ? 'alpro-btn-orange' : 'alpro-btn-grey'; ?>" style="text-decoration: none;">Admin</a>
+        <a href="<?php echo $admin_prefix; ?>aap_staff_assignments.php" class="alpro-btn <?php echo ($current_page == 'aap_staff_assignments.php') ? 'alpro-btn-orange' : 'alpro-btn-grey'; ?>" style="text-decoration: none;">Staff Assignments</a>
         <?php endif; ?>
 
         <div style="margin-left: auto; display: flex; align-items: center; gap: 10px; position: relative;">

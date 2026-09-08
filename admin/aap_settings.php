@@ -13,10 +13,16 @@ if (!isset($conn) || !($conn instanceof mysqli)) {
 }
 require_once('../aap_lib.php');
 
+// This page grants/revokes staff.aap (AAP SuperAdmin) itself, so it's
+// SuperAdmin-only (staff.aap = 2), not general aapIsAdmin() - a grade>=4/
+// Digital Innovation/staff.aap=1 admin ("Admin 1") can manage Case Types
+// but must not be able to hand themselves or anyone else SuperAdmin. Only
+// an existing SuperAdmin ("Admin 2") can open this page.
 $aap_dept_ids = aapDeptIdsFromCsv($department);
-$aap_is_admin = aapIsAdmin($grade, $aap_dept_ids, aapFetchIsSuperAdmin($conn, $id_user));
-if (!$aap_is_admin) {
-    die("Admin access only. This page manages AAP SuperAdmin Access.");
+$aap_is_superadmin = aapFetchIsSuperAdmin($conn, $id_user);
+$aap_is_admin = aapIsAdmin($grade, $aap_dept_ids, $aap_is_superadmin, aapFetchAapLevel($conn, $id_user));
+if (!$aap_is_superadmin) {
+    die("SuperAdmin access only. This page manages AAP SuperAdmin Access.");
 }
 
 $msg = "";
@@ -77,7 +83,13 @@ if (isset($_POST['action']) && $_POST['action'] === 'update_aap_superadmin' && $
     ob_end_clean();
     header('Content-Type: application/json');
     $target_id = (int)($_POST['staff_id'] ?? 0);
-    $aap_val = (isset($_POST['aap']) && (int)$_POST['aap'] === 1) ? 1 : 0;
+    // staff.aap is a level, not a flag: 0 = no access, 1 = "Admin 1"
+    // (general admin), 2 = "Admin 2" (full SuperAdmin) - see
+    // aapFetchAapLevel()/aapFetchIsSuperAdmin() in aap_lib.php. Anything
+    // else posted collapses to 0 rather than left as whatever garbage came
+    // in.
+    $aap_val = (int)($_POST['aap'] ?? 0);
+    if (!in_array($aap_val, [0, 1, 2], true)) $aap_val = 0;
 
     if ($target_id <= 0) {
         echo json_encode(['success' => false, 'message' => 'Invalid staff.']);
@@ -128,7 +140,7 @@ $aap_base = '../';
 
     <div class="aap-card">
         <table class="alpro-table aap-sa-list-table" width="100%">
-            <tr><th>Staff Name</th><th>Department</th><th>AAP Admin</th><th></th></tr>
+            <tr><th>Staff Name</th><th>Department</th><th>AAP Access</th><th></th></tr>
             <tbody id="sa-staff-tbody">
                 <tr><td colspan="4" align="center" style="padding:15px;">Loading...</td></tr>
             </tbody>
@@ -142,10 +154,14 @@ $aap_base = '../';
         <h6 class="aap-card-title" style="margin-bottom:14px;">Update SuperAdmin Access</h6>
         <p style="margin:0 0 4px;"><strong>Name:</strong> <span id="sa-info-name"></span></p>
         <p style="margin:0 0 14px;"><strong>Department:</strong> <span id="sa-info-dept"></span></p>
-        <label style="display:flex; align-items:center; gap:8px; font-weight:normal; margin-bottom:14px;">
-            <input type="checkbox" id="sa-aap-toggle">
-            AAP Admin
-        </label>
+        <div class="alpro-field" style="margin-bottom:14px;">
+            <label style="font-size:10px; font-weight:600; color:#6c757d; text-transform:uppercase;">AAP Access Level</label>
+            <select class="alpro-input" id="sa-aap-level">
+                <option value="0">No Access</option>
+                <option value="1">Admin 1 (general admin)</option>
+                <option value="2">Admin 2 (SuperAdmin - full access)</option>
+            </select>
+        </div>
         <div id="sa-alert" class="alpro-alert" style="display:none; margin-bottom:10px;"></div>
         <div class="alpro-actions" style="justify-content:flex-end;">
             <button type="button" class="alpro-btn alpro-btn-grey" id="sa-cancel-btn">Cancel</button>

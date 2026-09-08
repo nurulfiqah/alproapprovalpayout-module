@@ -82,16 +82,7 @@ document.addEventListener('DOMContentLoaded', function () {
         var lines = [];
         if (opt.dataset.desc) lines.push(opt.dataset.desc);
         if (opt.dataset.physical === '1') lines.push('<strong>Physical return confirmation required</strong> before this case can reach the Approval Gate.');
-
-        var poolName = (opt.dataset.approverMode === 'cs_tier') ? 'Customer Support or Operations' : 'Operations';
-
-        if (opt.dataset.approverMode === 'bu_signoff') {
-            lines.push('<strong>Approved by the owning Business Unit</strong>, not ' + poolName + '.');
-        } else {
-            lines.push('Approved by ' + poolName + ' staff with a personal RM ceiling covering this case\'s value.');
-        }
-        if (opt.dataset.turnaround) lines.push('Target turnaround: up to ' + opt.dataset.turnaround + ' working day(s).');
-        if (opt.dataset.systems) lines.push('Systems: ' + opt.dataset.systems);
+        lines.push('Approved by the staff assigned to this Case Type\'s Approval Gate.');
 
         info.innerHTML = lines.join('<br>');
         info.style.display = 'block';

@@ -14,8 +14,16 @@
         }
     }
 
-    function badge(isYes) {
-        return '<span class="alpro-badge alpro-badge-' + (isYes ? 'approved' : 'voided') + '">' + (isYes ? 'Yes' : 'No') + '</span>';
+    // staff.aap is a level (0/1/2), not a plain flag - see
+    // aapFetchAapLevel()/aapFetchIsSuperAdmin() in aap_lib.php.
+    function levelLabel(level) {
+        if (level === 2) return 'Admin 2 (SuperAdmin)';
+        if (level === 1) return 'Admin 1';
+        return 'No Access';
+    }
+    function badge(level) {
+        var cls = level === 2 ? 'approved' : (level === 1 ? 'pending' : 'voided');
+        return '<span class="alpro-badge alpro-badge-' + cls + '">' + levelLabel(level) + '</span>';
     }
     function esc(s) {
         var d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML;
@@ -49,7 +57,7 @@
             html += '<tr>'
                 + '<td>' + esc(s.nama_staff) + '</td>'
                 + '<td class="alpro-muted">' + esc(s.department_name) + '</td>'
-                + '<td>' + badge(s.aap === 1) + '</td>'
+                + '<td>' + badge(s.aap) + '</td>'
                 + '<td><button type="button" class="alpro-btn alpro-btn-grey sa-edit-btn" data-id="' + s.id + '" data-name="' + esc(s.nama_staff) + '" data-dept="' + esc(s.department_name) + '" data-aap="' + s.aap + '">Edit</button></td>'
                 + '</tr>';
         });
@@ -132,7 +140,7 @@
             selectedStaffId = btn.getAttribute('data-id');
             document.getElementById('sa-info-name').textContent = btn.getAttribute('data-name');
             document.getElementById('sa-info-dept').textContent = btn.getAttribute('data-dept');
-            document.getElementById('sa-aap-toggle').checked = btn.getAttribute('data-aap') === '1';
+            document.getElementById('sa-aap-level').value = btn.getAttribute('data-aap') || '0';
             document.getElementById('sa-alert').style.display = 'none';
             editEl.style.display = 'block';
             editEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -148,7 +156,7 @@
             var body = new URLSearchParams();
             body.set('action', 'update_aap_superadmin');
             body.set('staff_id', selectedStaffId);
-            body.set('aap', document.getElementById('sa-aap-toggle').checked ? '1' : '0');
+            body.set('aap', document.getElementById('sa-aap-level').value);
 
             fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function (res) {
                 var alertEl = document.getElementById('sa-alert');

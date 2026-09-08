@@ -9,7 +9,7 @@ if (!isset($conn) || !($conn instanceof mysqli)) {
 require_once('aap_lib.php');
 
 $aap_dept_ids = aapDeptIdsFromCsv($department);
-$aap_is_admin = aapIsAdmin($grade, $aap_dept_ids, aapFetchIsSuperAdmin($conn, $id_user));
+$aap_is_admin = aapIsAdmin($grade, $aap_dept_ids, aapFetchIsSuperAdmin($conn, $id_user), aapFetchAapLevel($conn, $id_user));
 
 $id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
 $case = $id ? aapFetchCase($conn, $id) : null;

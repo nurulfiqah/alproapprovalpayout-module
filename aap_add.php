@@ -9,7 +9,9 @@ if (!isset($conn) || !($conn instanceof mysqli)) {
 require_once('aap_lib.php');
 
 $aap_dept_ids = aapDeptIdsFromCsv($department);
-$aap_is_admin = aapIsAdmin($grade, $aap_dept_ids, aapFetchIsSuperAdmin($conn, $id_user));
+$aap_is_superadmin = aapFetchIsSuperAdmin($conn, $id_user);
+$aap_is_admin = aapIsAdmin($grade, $aap_dept_ids, $aap_is_superadmin, aapFetchAapLevel($conn, $id_user));
+$aap_can_manage_all_depts = aapCanManageAllDepartments($grade, $aap_dept_ids, $aap_is_superadmin);
 $my_dept_id = !empty($aap_dept_ids) ? $aap_dept_ids[0] : null;
 if ((int)$grade < 1 && !$aap_is_admin) {
     die("You do not have access to this module.");
@@ -36,6 +38,23 @@ if (!$prefill_fixit_id) {
 }
 
 $fixit_record = aapFetchFixitRecord($conn, $prefill_fixit_id);
+
+// Raising is scoped to the Fixit report's own department, same rule as
+// admin/aap_admin.php's Case Type management - any staff member belonging
+// to that department can raise the case (no value/tier check here at all;
+// that's decided later, live, at the Approval Gate via each Case Type's
+// Level 2/3 Staff Tier lists - see aapCanApprove() in aap_lib.php).
+// Full-list here is grade>=4/SuperAdmin/Customer Support
+// (aapCanManageAllDepartments()) PLUS Operations - Operations is not part
+// of that function's set (it doesn't manage Case Types generally), but they
+// already see and act on every department's ticket in the whole "Incoming
+// from Fixit" queue on index.php ($aap_can_see_incoming there), so they need
+// the same cross-department raise ability here to keep that workflow working.
+$aap_can_raise_any_dept = $aap_can_manage_all_depts || aapIsOperations($aap_dept_ids);
+if (!$fixit_record || !aapDeptInScope($fixit_record['department_id'], $aap_dept_ids, $aap_can_raise_any_dept)) {
+    die("You can only raise a case for a Fixit report lodged against your own department.");
+}
+
 $fixit_attachments = aapFetchFixitAttachments($conn, $prefill_fixit_id);
 
 // Evidence Note stays blank by default — the original Fixit report is shown
@@ -53,19 +72,38 @@ if (empty($case_types)) {
 
 $departments = aapFetchDepartmentsWithCaseTypes($conn);
 
+// The Department filter defaults to (and is locked to) the originating
+// Fixit report's own department, not the requester's own - a case raised
+// from a Fixit ticket lodged against Academy must pick from Academy's Case
+// Types even if the staff member raising it personally belongs to a
+// different department (e.g. Customer Support handling the handoff). Every
+// visit here has a fixit record (aap_add.php redirects to index.php
+// otherwise, see above), so this is always set.
+$prefill_dept_id = $fixit_record['department_id'] ?? null;
+
 if (isset($_POST['raise_case'])) {
     $case_type_id = (int)$_POST['case_type_id'];
     $ct = aapFetchCaseType($conn, $case_type_id);
     $fixit_record_id = isset($_POST['fixit_record_id']) && $_POST['fixit_record_id'] !== '' ? (int)$_POST['fixit_record_id'] : null;
 
+    // The Department picker is locked client-side to the Fixit report's own
+    // department (see $prefill_dept_id above) purely as a convenience/UI
+    // guarantee - it does not itself stop a tampered POST from submitting a
+    // case_type_id belonging to a different department, so that match is
+    // re-verified here server-side.
     if (!$ct || (int)$ct['recycle'] === 1) {
         $msg = "Invalid or retired Case Type selected.";
         $msg_type = "alpro-danger";
+    } elseif ((int)$ct['department_id'] !== (int)$fixit_record['department_id']) {
+        $msg = "That Case Type does not belong to this Fixit report's department.";
+        $msg_type = "alpro-danger";
     } else {
         // Requester Type / Requesting Channel are no longer collected on this
-        // form - Requester Type falls back to the Case Type's own default;
-        // Requesting Channel has no equivalent default, so it's left blank.
-        $requester_type      = in_array($_POST['requester_type'] ?? null, ['customer','outlet','bu'], true) ? $_POST['requester_type'] : $ct['default_requester_type'];
+        // form - Requester Type falls back to 'customer' (Case Type no longer
+        // carries its own default_requester_type - dropped from aap_case_types
+        // when Case Types moved to the Staff Tier approval model); Requesting
+        // Channel has no equivalent default, so it's left blank.
+        $requester_type      = in_array($_POST['requester_type'] ?? null, ['customer','outlet','bu'], true) ? $_POST['requester_type'] : 'customer';
         $requesting_channel  = trim($_POST['requesting_channel'] ?? '');
         $customer_membership_id = trim($_POST['customer_membership_id']);
         $transaction_ref     = trim($_POST['transaction_ref']);
@@ -82,21 +120,19 @@ if (isset($_POST['raise_case'])) {
             INSERT INTO aap_cases
                 (case_ref, case_type_id, requester_type, requesting_channel, requester_staff_id, requester_department_id,
                  customer_membership_id, transaction_ref, evidence_note, calculated_value, value_type, recommended_outcome,
-                 physical_confirm_required, physical_confirm_status, approver_mode, ops_tier_required, approval_status, execution_status, case_status,
+                 physical_confirm_required, physical_confirm_status, approval_status, execution_status, case_status,
                  created_by, timestamp, updated_at, fixit_record_id)
             VALUES
                 ('', ?, ?, ?, ?, ?,
                  ?, ?, ?, ?, ?, ?,
-                 ?, ?, ?, ?, 'pending', 'pending', 'draft',
+                 ?, ?, 'pending', 'pending', 'draft',
                  ?, ?, ?, ?)
         ");
-        $approver_mode_val = $ct['approver_mode'];
-        $ops_tier_required_val = $ct['ops_tier_required'];
         $stmt->bind_param(
-            "issiisssdssisssissi",
+            "issiisssdssisissi",
             $case_type_id, $requester_type, $requesting_channel, $id_user, $my_dept_id,
             $customer_membership_id, $transaction_ref, $evidence_note, $calculated_value, $value_type, $recommended_outcome,
-            $physical_required, $physical_status, $approver_mode_val, $ops_tier_required_val,
+            $physical_required, $physical_status,
             $id_user, $now, $now, $fixit_record_id
         );
 
@@ -110,7 +146,7 @@ if (isset($_POST['raise_case'])) {
             // Evidence uploads - stored on the corporate NAS, see aapUploadEvidenceFiles()
             aapUploadEvidenceFiles($conn, $new_id, $_FILES['evidence'] ?? null, $id_user, $now);
 
-            $audit_note = "Case raised as $case_ref (" . $ct['name'] . ", " . aapRequesterTypeLabel($requester_type) . ")";
+            $audit_note = "Case raised as $case_ref (" . $ct['case_type_name'] . ", " . aapRequesterTypeLabel($requester_type) . ")";
             if ($fixit_record_id) $audit_note .= ", linked from Fixit ticket F$fixit_record_id";
             aapLogAudit($conn, $new_id, 'case_raised', $id_user, $audit_note);
 
@@ -195,12 +231,13 @@ if (isset($_POST['raise_case'])) {
                     <div class="alpro-grid" style="flex-wrap:nowrap;">
                         <div class="alpro-field" style="flex:1; min-width:0;">
                             <label>Department <span class="aap-req">*</span></label>
-                            <select class="alpro-input" id="department_id_filter" required style="height:38px;">
+                            <select class="alpro-input" id="department_id_filter" required disabled style="height:38px;">
                                 <option value="">Select Department</option>
                                 <?php foreach ($departments as $dept): ?>
-                                    <option value="<?php echo $dept['id']; ?>" <?php echo ($my_dept_id == $dept['id']) ? 'selected' : ''; ?>><?php echo htmlspecialchars($dept['depart_name']); ?></option>
+                                    <option value="<?php echo $dept['id']; ?>" <?php echo ($prefill_dept_id == $dept['id']) ? 'selected' : ''; ?>><?php echo htmlspecialchars($dept['depart_name']); ?></option>
                                 <?php endforeach; ?>
                             </select>
+                            <p class="alpro-muted" style="font-size:12px; margin:6px 0 0;">Fixed to the originating Fixit report's department - pick the Case Type from that department's list.</p>
                         </div>
 
                         <div class="alpro-field" style="flex:2; min-width:0;">
@@ -210,13 +247,9 @@ if (isset($_POST['raise_case'])) {
                                 <?php foreach ($case_types as $ct): ?>
                                     <option value="<?php echo $ct['id']; ?>"
                                         data-department-id="<?php echo (int)$ct['department_id']; ?>"
-                                        data-requester-type="<?php echo htmlspecialchars($ct['default_requester_type']); ?>"
                                         data-physical="<?php echo (int)$ct['physical_confirm_required']; ?>"
-                                        data-approver-mode="<?php echo htmlspecialchars($ct['approver_mode']); ?>"
-                                        data-turnaround="<?php echo htmlspecialchars($ct['turnaround_days'] ?? ''); ?>"
-                                        data-systems="<?php echo htmlspecialchars($ct['systems_note'] ?? ''); ?>"
                                         data-desc="<?php echo htmlspecialchars($ct['description'] ?? ''); ?>">
-                                        <?php echo htmlspecialchars($ct['name']); ?>
+                                        <?php echo htmlspecialchars($ct['case_type_name']); ?>
                                     </option>
                                 <?php endforeach; ?>
                             </select>
@@ -286,8 +319,8 @@ if (isset($_POST['raise_case'])) {
 
             <div class="aap-bento-item aap-span-12">
                 <div class="alpro-actions" style="padding-top: 4px; justify-content:flex-end;">
-                    <button class="alpro-btn alpro-btn-grey" type="button" onclick="window.location.reload();" style="flex:0 0 auto;"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
-                    <button class="alpro-btn" type="submit" name="raise_case" style="flex:0 0 auto; background:#198754; color:#fff;"><i class="bi bi-check-lg"></i> Raise Case</button>
+                    <button class="alpro-btn alpro-btn-blue" type="submit" name="raise_case" style="flex:0 0 auto; padding:8px 20px; font-size:14px; border-radius:8px;">Raise Case</button>
+                    <button class="alpro-btn alpro-btn-grey" type="button" onclick="window.location.reload();" style="flex:0 0 auto; padding:8px 20px; font-size:14px; border-radius:8px; border:1px solid #000;">Refresh</button>
                 </div>
             </div>
         </div>

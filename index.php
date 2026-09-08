@@ -9,7 +9,7 @@ if (!isset($conn) || !($conn instanceof mysqli)) {
 require_once('aap_lib.php');
 
 $aap_dept_ids = aapDeptIdsFromCsv($department);
-$aap_is_admin = aapIsAdmin($grade, $aap_dept_ids, aapFetchIsSuperAdmin($conn, $id_user));
+$aap_is_admin = aapIsAdmin($grade, $aap_dept_ids, aapFetchIsSuperAdmin($conn, $id_user), aapFetchAapLevel($conn, $id_user));
 $aap_is_operations = aapIsOperations($aap_dept_ids);
 if ((int)$grade < 1 && !$aap_is_admin) {
     die("You do not have access to this module.");
@@ -18,33 +18,47 @@ if ((int)$grade < 1 && !$aap_is_admin) {
 // ---- Filters ----
 $f_status      = isset($_GET['case_status']) ? trim($_GET['case_status']) : '';
 $f_case_type   = isset($_GET['case_type_id']) && $_GET['case_type_id'] !== '' ? (int)$_GET['case_type_id'] : null;
+$f_outlet      = isset($_GET['outlet_id']) && $_GET['outlet_id'] !== '' ? (int)$_GET['outlet_id'] : null;
 $f_physical    = isset($_GET['physical_confirm_status']) ? trim($_GET['physical_confirm_status']) : '';
 $f_approval    = isset($_GET['approval_status']) ? trim($_GET['approval_status']) : '';
-$f_execution   = isset($_GET['execution_status']) ? trim($_GET['execution_status']) : '';
 $f_date        = isset($_GET['raised_date']) ? trim($_GET['raised_date']) : '';
 $f_closed_date = isset($_GET['closed_date']) ? trim($_GET['closed_date']) : '';
 $f_search      = isset($_GET['q']) ? trim($_GET['q']) : '';
 
-// Drafts aren't part of the main queue - they get their own tab below so
-// they don't clutter the active queue/stats while evidence is still being
-// gathered.
-$where = aapScopeWhere($id_user, $aap_dept_ids, $aap_is_admin) . " AND c.case_status != 'draft'";
-if ($f_status !== '' && in_array($f_status, ['open','rejected','executed','closed','voided'], true)) {
+// Drafts now live in the main queue (Status column shows them as
+// "Investigation in Progress" via aapCaseDisplayStatus) instead of a
+// separate tab - the Draft stat card above still gives a quick count.
+$where = aapScopeWhere($id_user, $aap_dept_ids, $aap_is_admin);
+if ($f_status === 'rejected') {
+    // Voided and Rejected are shown as one "Rejected" status (see
+    // aapCaseDisplayStatus in aap_lib.php) - filtering by it must catch both.
+    $where .= " AND c.case_status IN ('rejected', 'voided')";
+} elseif ($f_status === 'closed') {
+    // Executed and Closed are likewise shown as one "Closed" status.
+    $where .= " AND c.case_status IN ('closed', 'executed')";
+} elseif ($f_status !== '' && in_array($f_status, ['open', 'draft'], true)) {
     $where .= " AND c.case_status = '" . $conn->real_escape_string($f_status) . "'";
 }
 if ($f_case_type !== null) {
     $where .= " AND c.case_type_id = " . $f_case_type;
+}
+if ($f_outlet !== null) {
+    // No join in this $where's own query (the COUNT below runs against
+    // aap_cases alone) - a subquery on the linked Fixit ticket works in
+    // both places instead of relying on aapCaseSelectSql's joins.
+    $where .= " AND c.fixit_record_id IN (SELECT id FROM fixit_record WHERE outlet = " . $f_outlet . ")";
 }
 if ($f_physical === 'required') {
     $where .= " AND c.physical_confirm_required = 1";
 } elseif ($f_physical === 'not_required') {
     $where .= " AND c.physical_confirm_required = 0";
 }
-if ($f_approval !== '' && in_array($f_approval, ['pending','approved','corrected','rejected'], true)) {
+if ($f_approval === 'approved') {
+    // Corrected is shown as one "Approved" status (see aapApprovalStatusDisplay
+    // in aap_lib.php) - filtering by it must catch both.
+    $where .= " AND c.approval_status IN ('approved', 'corrected')";
+} elseif ($f_approval !== '' && in_array($f_approval, ['pending','rejected'], true)) {
     $where .= " AND c.approval_status = '" . $conn->real_escape_string($f_approval) . "'";
-}
-if ($f_execution !== '' && in_array($f_execution, ['pending','executed'], true)) {
-    $where .= " AND c.execution_status = '" . $conn->real_escape_string($f_execution) . "'";
 }
 if ($f_date !== '' && preg_match('/^\d{4}-\d{2}-\d{2}$/', $f_date)) {
     $where .= " AND DATE(c.timestamp) = '" . $conn->real_escape_string($f_date) . "'";
@@ -58,6 +72,7 @@ if ($f_search !== '') {
 }
 
 $filter_case_types = aapFetchCaseTypes($conn, true);
+$filter_outlets = aapFetchCaseOutletOptions($conn, aapScopeWhere($id_user, $aap_dept_ids, $aap_is_admin));
 
 // ---- Queue-position stat strip ----
 $stat_where = aapScopeWhere($id_user, $aap_dept_ids, $aap_is_admin);
@@ -89,38 +104,50 @@ $total_pages = max(1, (int)ceil($total_rows / $limit));
 $page = min($page, $total_pages);
 $offset = ($page - 1) * $limit;
 
-$list_sql = aapCaseSelectSql($where, 'c.timestamp DESC') . " LIMIT $limit OFFSET $offset";
+$f_sort = isset($_GET['sort']) && in_array($_GET['sort'], ['timestamp', 'closed_at'], true) ? $_GET['sort'] : 'timestamp';
+$f_dir  = isset($_GET['dir']) && $_GET['dir'] === 'asc' ? 'asc' : 'desc';
+$list_sql = aapCaseSelectSql($where, "c.$f_sort $f_dir") . " LIMIT $limit OFFSET $offset";
 $list_res = $conn->query($list_sql);
+
+// Sortable "Raised"/"Closed" column headers - clicking toggles asc/desc for
+// that column (defaulting to desc first), keeping every other active filter.
+function aapSortHeaderLink($column, $label, $f_sort, $f_dir) {
+    $qs = $_GET; unset($qs['page']);
+    $next_dir = ($f_sort === $column && $f_dir === 'desc') ? 'asc' : 'desc';
+    $qs['sort'] = $column;
+    $qs['dir'] = $next_dir;
+    $arrow = ($f_sort === $column) ? ($f_dir === 'asc' ? ' ▲' : ' ▼') : '';
+    return '<a href="?' . htmlspecialchars(http_build_query($qs)) . '" style="color:inherit; text-decoration:none;">' . htmlspecialchars($label) . $arrow . '</a>';
+}
 
 // Fixit tickets lodged under an AAP-linked category that haven't been
 // converted into an AAP case yet — CS/Operations/admin's work queue, so
 // nobody has to remember to click through from Fixit.
 $aap_can_see_incoming = $aap_is_admin || $aap_is_operations || aapIsCustomerSupport($aap_dept_ids);
 
+// ---- Incoming from Fixit filters ----
+$if_category = isset($_GET['if_category']) && $_GET['if_category'] !== '' ? (int)$_GET['if_category'] : null;
+$if_outlet   = isset($_GET['if_outlet']) && $_GET['if_outlet'] !== '' ? (int)$_GET['if_outlet'] : null;
+$if_lodged_by = isset($_GET['if_lodged_by']) ? trim($_GET['if_lodged_by']) : '';
+$if_date      = isset($_GET['if_date']) ? trim($_GET['if_date']) : '';
+$incoming_filters = [
+    'category_id' => $if_category,
+    'outlet_id' => $if_outlet,
+    'lodged_by' => $if_lodged_by,
+    'date' => $if_date,
+];
+$filter_incoming_categories = $aap_can_see_incoming ? aapFetchIncomingFixitCategoryOptions($conn) : [];
+$filter_incoming_outlets = $aap_can_see_incoming ? aapFetchIncomingFixitOutletOptions($conn) : [];
+
 $i_limit = 20;
 $i_page = isset($_GET['ipage']) ? max(1, (int)$_GET['ipage']) : 1;
-$incoming_total = $aap_can_see_incoming ? aapCountIncomingFixitTickets($conn) : 0;
+$incoming_total = $aap_can_see_incoming ? aapCountIncomingFixitTickets($conn, $incoming_filters) : 0;
 $incoming_total_pages = max(1, (int)ceil($incoming_total / $i_limit));
 $i_page = min($i_page, $incoming_total_pages);
 $i_offset = ($i_page - 1) * $i_limit;
-$incoming_fixit = $aap_can_see_incoming ? aapFetchIncomingFixitTickets($conn, $i_limit, $i_offset) : [];
+$incoming_fixit = $aap_can_see_incoming ? aapFetchIncomingFixitTickets($conn, $i_limit, $i_offset, $incoming_filters) : [];
 
-// ---- Draft cases (own scope) ----
-// Not yet opened for the approval workflow - kept in their own tab so the
-// issuer/CS team has a place to keep gathering evidence without the case
-// cluttering the main queue or dashboard stats.
-$d_limit = 20;
-$d_page = isset($_GET['dpage']) ? max(1, (int)$_GET['dpage']) : 1;
-$draft_where = aapScopeWhere($id_user, $aap_dept_ids, $aap_is_admin) . " AND c.case_status = 'draft'";
-$draft_count_res = $conn->query("SELECT COUNT(*) c FROM aap_cases c WHERE $draft_where");
-$draft_total = $draft_count_res ? (int)$draft_count_res->fetch_assoc()['c'] : 0;
-$draft_total_pages = max(1, (int)ceil($draft_total / $d_limit));
-$d_page = min($d_page, $draft_total_pages);
-$d_offset = ($d_page - 1) * $d_limit;
-$draft_list_sql = aapCaseSelectSql($draft_where, 'c.timestamp DESC') . " LIMIT $d_limit OFFSET $d_offset";
-$draft_res = $conn->query($draft_list_sql);
-
-$active_tab = (isset($_GET['tab']) && in_array($_GET['tab'], ['incoming', 'draft'], true) && ($_GET['tab'] !== 'incoming' || $aap_can_see_incoming)) ? $_GET['tab'] : 'queue';
+$active_tab = (isset($_GET['tab']) && $_GET['tab'] === 'incoming' && $aap_can_see_incoming) ? 'incoming' : 'queue';
 ?>
 
 <?php include('aap_modern_head.php'); ?>
@@ -145,12 +172,8 @@ $active_tab = (isset($_GET['tab']) && in_array($_GET['tab'], ['incoming', 'draft
     </div>
     <?php endif; ?>
     <div class="aap-stat" style="border-top-color:#b8860b;">
-        <h3>Draft</h3>
-        <div class="value"><?php echo number_format($stats['draft']); ?></div>
-    </div>
-    <div class="aap-stat">
         <h3>Open Cases</h3>
-        <div class="value"><?php echo number_format($stats['open']); ?></div>
+        <div class="value"><?php echo number_format($stats['draft'] + $stats['open']); ?></div>
     </div>
     <div class="aap-stat" style="border-top-color:#f39c12;">
         <h3>Physical Confirm Pending</h3>
@@ -173,7 +196,6 @@ $active_tab = (isset($_GET['tab']) && in_array($_GET['tab'], ['incoming', 'draft
 <div class="aap-card" style="padding: 0;">
     <div class="aap-tabs" style="padding: 6px 20px 0; border-bottom-color: #e9ecef;">
         <button type="button" class="aap-tab-btn <?php echo $active_tab === 'queue' ? 'active' : ''; ?>" data-tab="queue">Case Queue <span class="aap-tab-count"><?php echo number_format($total_rows); ?></span></button>
-        <button type="button" class="aap-tab-btn <?php echo $active_tab === 'draft' ? 'active' : ''; ?>" data-tab="draft">Draft <span class="aap-tab-count"><?php echo number_format($draft_total); ?></span></button>
         <?php if ($aap_can_see_incoming): ?>
         <button type="button" class="aap-tab-btn <?php echo $active_tab === 'incoming' ? 'active' : ''; ?>" data-tab="incoming">Incoming from Fixit <span class="aap-tab-count red"><?php echo number_format($incoming_total); ?></span></button>
         <?php endif; ?>
@@ -188,7 +210,7 @@ $active_tab = (isset($_GET['tab']) && in_array($_GET['tab'], ['incoming', 'draft
                     <label>Case Status</label>
                     <select class="alpro-input" name="case_status">
                         <option value="">All Statuses</option>
-                        <?php foreach (['open' => 'Open', 'rejected' => 'Rejected', 'executed' => 'Executed', 'closed' => 'Closed', 'voided' => 'Voided'] as $k => $v): ?>
+                        <?php foreach (['draft' => 'Draft', 'open' => 'Open', 'rejected' => 'Rejected', 'closed' => 'Closed'] as $k => $v): ?>
                             <option value="<?php echo $k; ?>" <?php echo ($f_status === $k) ? 'selected' : ''; ?>><?php echo $v; ?></option>
                         <?php endforeach; ?>
                     </select>
@@ -198,7 +220,16 @@ $active_tab = (isset($_GET['tab']) && in_array($_GET['tab'], ['incoming', 'draft
                     <select class="alpro-input" name="case_type_id">
                         <option value="">All Case Types</option>
                         <?php foreach ($filter_case_types as $ct): ?>
-                            <option value="<?php echo $ct['id']; ?>" <?php echo ($f_case_type === (int)$ct['id']) ? 'selected' : ''; ?>><?php echo htmlspecialchars($ct['name']); ?></option>
+                            <option value="<?php echo $ct['id']; ?>" <?php echo ($f_case_type === (int)$ct['id']) ? 'selected' : ''; ?>><?php echo htmlspecialchars($ct['case_type_name']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="alpro-field">
+                    <label>Outlet</label>
+                    <select class="alpro-input" name="outlet_id">
+                        <option value="">All Outlets</option>
+                        <?php foreach ($filter_outlets as $ol): ?>
+                            <option value="<?php echo $ol['id']; ?>" <?php echo ($f_outlet === (int)$ol['id']) ? 'selected' : ''; ?>><?php echo htmlspecialchars($ol['code']); ?></option>
                         <?php endforeach; ?>
                     </select>
                 </div>
@@ -214,17 +245,8 @@ $active_tab = (isset($_GET['tab']) && in_array($_GET['tab'], ['incoming', 'draft
                     <label>Approval</label>
                     <select class="alpro-input" name="approval_status">
                         <option value="">All</option>
-                        <?php foreach (['pending' => 'Pending', 'approved' => 'Approved', 'corrected' => 'Corrected', 'rejected' => 'Rejected'] as $k => $v): ?>
+                        <?php foreach (['pending' => 'Pending', 'approved' => 'Approved', 'rejected' => 'Rejected'] as $k => $v): ?>
                             <option value="<?php echo $k; ?>" <?php echo ($f_approval === $k) ? 'selected' : ''; ?>><?php echo $v; ?></option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-                <div class="alpro-field">
-                    <label>Execution</label>
-                    <select class="alpro-input" name="execution_status">
-                        <option value="">All</option>
-                        <?php foreach (['pending' => 'Pending', 'executed' => 'Executed'] as $k => $v): ?>
-                            <option value="<?php echo $k; ?>" <?php echo ($f_execution === $k) ? 'selected' : ''; ?>><?php echo $v; ?></option>
                         <?php endforeach; ?>
                     </select>
                 </div>
@@ -252,12 +274,11 @@ $active_tab = (isset($_GET['tab']) && in_array($_GET['tab'], ['incoming', 'draft
             <tr>
                 <th>Case Ref</th>
                 <th>Case Type</th>
-                <th>Physical Confirm</th>
+                <th style="text-align:center;">Physical Confirm</th>
                 <th>Approval</th>
-                <th>Execution</th>
                 <th>Status</th>
-                <th>Raised</th>
-                <th>Closed</th>
+                <th><?php echo aapSortHeaderLink('timestamp', 'Raised', $f_sort, $f_dir); ?></th>
+                <th><?php echo aapSortHeaderLink('closed_at', 'Closed', $f_sort, $f_dir); ?></th>
                 <th>Action</th>
             </tr>
             <?php if ($list_res && $list_res->num_rows > 0): ?>
@@ -281,12 +302,12 @@ $active_tab = (isset($_GET['tab']) && in_array($_GET['tab'], ['incoming', 'draft
                         <i class="bi <?php echo $pc_icon; ?>" style="color:<?php echo $pc_color; ?>; font-size:16px;" title="<?php echo htmlspecialchars(aapPhysicalStatusLabel($row['physical_confirm_status'])); ?>"></i>
                     </td>
                     <td>
-                        <span class="alpro-badge alpro-badge-<?php echo htmlspecialchars($row['approval_status']); ?>"><?php echo ucfirst($row['approval_status']); ?></span>
+                        <?php $row_approval_display = aapApprovalStatusDisplay($row['approval_status']); ?>
+                        <span class="alpro-badge alpro-badge-<?php echo $row_approval_display['slug']; ?>"><?php echo htmlspecialchars($row_approval_display['label']); ?></span>
                         <?php if ($row['approval_tier']): ?>
                             <span class="alpro-badge alpro-badge-<?php echo $row['approval_tier']; ?>"><?php echo ucfirst($row['approval_tier']); ?></span>
                         <?php endif; ?>
                     </td>
-                    <td><?php echo ucfirst($row['execution_status']); ?></td>
                     <?php $row_display_status = aapCaseDisplayStatus($row); ?>
                     <td><span class="alpro-badge alpro-badge-<?php echo $row_display_status['slug']; ?>"><?php echo htmlspecialchars($row_display_status['label']); ?></span></td>
                     <td><?php echo date('d-m-Y', strtotime($row['timestamp'])); ?></td>
@@ -296,7 +317,7 @@ $active_tab = (isset($_GET['tab']) && in_array($_GET['tab'], ['incoming', 'draft
                 <?php endwhile; ?>
             <?php else: ?>
                 <tr>
-                    <td colspan="9" align="center" style="padding: 15px;">No cases found for the current filter.</td>
+                    <td colspan="8" align="center" style="padding: 15px;">No cases found for the current filter.</td>
                 </tr>
             <?php endif; ?>
         </table>
@@ -325,69 +346,47 @@ $active_tab = (isset($_GET['tab']) && in_array($_GET['tab'], ['incoming', 'draft
 
 </div>
 
-<div id="tab-draft" class="aap-tab-panel <?php echo $active_tab === 'draft' ? 'active' : ''; ?>">
-    <div style="padding: 20px;">
-        <table class="alpro-table" width="100%">
-            <tr>
-                <th>Case Ref</th>
-                <th>Case Type</th>
-                <th>Value</th>
-                <th>Raised By</th>
-                <th>Raised</th>
-                <th>Action</th>
-            </tr>
-            <?php if ($draft_res && $draft_res->num_rows > 0): ?>
-                <?php while ($row = $draft_res->fetch_assoc()): ?>
-                <tr>
-                    <td class="alpro-mono">
-                        <?php echo htmlspecialchars($row['case_ref']); ?>
-                        <?php if (!empty($row['fixit_record_id'])): ?>
-                            <br><a href="<?php echo htmlspecialchars(aapFixitTicketUrl($row['fixit_record_id'])); ?>" target="_blank" style="font-size:10px;">Fixit F<?php echo (int)$row['fixit_record_id']; ?></a>
-                        <?php endif; ?>
-                    </td>
-                    <td>
-                        <?php echo htmlspecialchars($row['case_type_name']); ?>
-                        <?php $outlet_label = $row['fixit_outlet_code'] ?: $row['case_type_department_name']; ?>
-                        <?php if (!empty($outlet_label)): ?>
-                            <br><span class="alpro-muted" style="font-size:11px; color:#6c757d;"><?php echo htmlspecialchars($outlet_label); ?></span>
-                        <?php endif; ?>
-                    </td>
-                    <td><?php echo aapFormatValue($row['calculated_value'], $row['value_type']); ?></td>
-                    <td><?php echo htmlspecialchars($row['requester_name'] ?: '—'); ?></td>
-                    <td><?php echo date('d-m-Y', strtotime($row['timestamp'])); ?></td>
-                    <td><a href="aap_update.php?id=<?php echo $row['id']; ?>" class="alpro-btn alpro-btn-blue" style="text-decoration:none; padding:4px 10px; font-size:12px; display:inline-flex; align-items:center; justify-content:center;" title="Open"><i class="bi bi-box-arrow-up-right"></i></a></td>
-                </tr>
-                <?php endwhile; ?>
-            <?php else: ?>
-                <tr>
-                    <td colspan="6" align="center" style="padding: 15px;">No draft cases.</td>
-                </tr>
-            <?php endif; ?>
-        </table>
-
-        <?php if ($draft_total_pages > 1): ?>
-        <div style="display:flex; justify-content:center; gap:4px; margin-top:8px; flex-wrap:wrap;">
-            <?php
-            $dqs = $_GET; unset($dqs['dpage']); $dqs['tab'] = 'draft';
-            $d_base_qs = http_build_query($dqs);
-            for ($i = 1; $i <= $draft_total_pages; $i++):
-                $d_active = ($i == $d_page) ? 'background:#2980b9;color:white;border-color:#2980b9;' : 'background:white;color:#333;';
-            ?>
-                <a href="?<?php echo $d_base_qs; ?>&dpage=<?php echo $i; ?>" style="padding:3px 9px; border:1px solid #ddd; border-radius:4px; text-decoration:none; font-size:11px;<?php echo $d_active; ?>"><?php echo $i; ?></a>
-            <?php endfor; ?>
-        </div>
-        <div style="text-align:center; font-size:11px; color:#7f8c8d; margin-top:4px;">
-            Page <?php echo $d_page; ?> of <?php echo $draft_total_pages; ?> &nbsp;|&nbsp; <?php echo $draft_total; ?> total drafts
-        </div>
-        <?php endif; ?>
-    </div>
-</div>
-
 <?php if ($aap_can_see_incoming): ?>
 <div id="tab-incoming" class="aap-tab-panel <?php echo $active_tab === 'incoming' ? 'active' : ''; ?>">
 
     <div style="padding: 20px;">
-        <table class="alpro-table" width="100%">
+        <form method="get" action="" class="aap-filter-compact">
+            <input type="hidden" name="tab" value="incoming">
+            <div class="alpro-grid">
+                <div class="alpro-field">
+                    <label>Category</label>
+                    <select class="alpro-input" name="if_category">
+                        <option value="">All Categories</option>
+                        <?php foreach ($filter_incoming_categories as $cat): ?>
+                            <option value="<?php echo $cat['id']; ?>" <?php echo ($if_category === (int)$cat['id']) ? 'selected' : ''; ?>><?php echo htmlspecialchars($cat['category']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="alpro-field">
+                    <label>Outlet</label>
+                    <select class="alpro-input" name="if_outlet">
+                        <option value="">All Outlets</option>
+                        <?php foreach ($filter_incoming_outlets as $ol): ?>
+                            <option value="<?php echo $ol['id']; ?>" <?php echo ($if_outlet === (int)$ol['id']) ? 'selected' : ''; ?>><?php echo htmlspecialchars($ol['code']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="alpro-field">
+                    <label>Lodged By</label>
+                    <input class="alpro-input" type="text" name="if_lodged_by" value="<?php echo htmlspecialchars($if_lodged_by); ?>" placeholder="Staff name...">
+                </div>
+                <div class="alpro-field">
+                    <label>Date Lodged</label>
+                    <input class="alpro-input" type="date" name="if_date" value="<?php echo htmlspecialchars($if_date); ?>">
+                </div>
+                <div class="alpro-actions" style="grid-column: 1 / -1; justify-content:flex-end;">
+                    <input class="alpro-btn alpro-btn-blue" type="submit" value="Filter">
+                    <a href="index.php?tab=incoming" class="alpro-btn alpro-btn-grey" style="text-decoration:none;">Reset</a>
+                </div>
+            </div>
+        </form>
+
+        <table class="alpro-table" width="100%" style="margin-top:16px;">
             <tr>
                 <th>Fixit Ref</th>
                 <th>Report</th>
@@ -406,7 +405,7 @@ $active_tab = (isset($_GET['tab']) && in_array($_GET['tab'], ['incoming', 'draft
                     <td><?php echo htmlspecialchars($ft['outlet_code'] ?: '—'); ?></td>
                     <td><?php echo htmlspecialchars($ft['lodged_by_name'] ?: '—'); ?></td>
                     <td><?php echo $ft['lodge'] ? date('d-m-Y H:i', strtotime($ft['lodge'])) : '—'; ?></td>
-                    <td><a href="aap_add.php?fixit_id=<?php echo (int)$ft['id']; ?>&fixit_ref=F<?php echo (int)$ft['id']; ?>" class="alpro-btn alpro-btn-blue" style="text-decoration:none; padding:4px 10px; font-size:12px;">Raise Case</a></td>
+                    <td><a href="aap_add.php?fixit_id=<?php echo (int)$ft['id']; ?>&fixit_ref=F<?php echo (int)$ft['id']; ?>" class="alpro-btn alpro-btn-blue" style="text-decoration:none; padding:4px 10px; font-size:12px; display:inline-flex; align-items:center; justify-content:center;" title="Open Case"><i class="bi bi-box-arrow-up-right"></i></a></td>
                 </tr>
                 <?php endforeach; ?>
             <?php else: ?>

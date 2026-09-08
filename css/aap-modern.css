@@ -100,10 +100,21 @@
 .aap-modern .alpro-danger { background: #fdeceb; color: #a52a20; border: 1px solid #f5c6c0; }
 .aap-modern .alpro-warn { background: #fff6e5; color: #8a5a00; border: 1px solid #ffe0a3; }
 
-.aap-modern table.alpro-table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 13px; }
+.aap-modern table.alpro-table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 13px; border: 1px solid #e9ecef; border-radius: 8px; overflow: hidden; }
 .aap-modern table.alpro-table th { background: #f8f9fa !important; color: #495057; text-transform: uppercase; font-size: 11px; letter-spacing: .03em; padding: 10px; text-align: left; border-bottom: 1px solid #e9ecef; }
-.aap-modern table.alpro-table td { padding: 10px; border-bottom: 1px solid #f1f3f5; }
+.aap-modern table.alpro-table td { padding: 10px; border-bottom: 1px solid #f1f3f5; vertical-align: middle; }
 .aap-modern table.alpro-table tr:last-child td { border-bottom: none; }
+.aap-modern table.alpro-table tbody tr:nth-child(even) { background: #fbfcfd; }
+.aap-modern table.alpro-table tbody tr:hover { background: #f0f6fe; }
+.aap-modern table.alpro-table input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; vertical-align: middle; }
+
+/* Staff assigned to a Group tier (Approval Unit Master) - each name gets a
+   small pill instead of plain comma-separated text, with the manual-
+   override "unassign" × as part of the pill rather than loose red text
+   floating next to the name. */
+.aap-tier-staff-pill { display: inline-flex; align-items: center; gap: 5px; background: #eef2f7; color: #33414e; border-radius: 12px; padding: 2px 6px 2px 10px; font-size: 12px; margin: 2px 4px 2px 0; }
+.aap-tier-staff-pill .group-staff-unassign { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; background: #f8d7da; color: #842029; font-size: 12px; font-weight: bold; line-height: 1; cursor: pointer; }
+.aap-tier-staff-pill .group-staff-unassign:hover { background: #f1aeb5; }
 
 .aap-attach-list { list-style: none; margin: 14px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .aap-attach-list li { font-size: 13px; padding: 8px 10px; background: #f8f9fa; border-radius: 6px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
@@ -172,17 +183,17 @@
 .aap-tab-panel { display: none; }
 .aap-tab-panel.active { display: block; }
 
-.aap-filter-compact .alpro-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px 12px; }
-.aap-filter-compact .alpro-field label { font-size: 10px; margin-bottom: 2px; }
-.aap-filter-compact .alpro-input { padding: 4px 8px; font-size: 12px; height: auto; min-height: 0; line-height: 1.2; }
+.aap-filter-compact .alpro-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 6px 10px; }
+.aap-filter-compact .alpro-field label { font-size: 9px; margin-bottom: 2px; }
+.aap-filter-compact .alpro-input { padding: 3px 6px; font-size: 11px; height: auto; min-height: 0; line-height: 1.2; }
 .aap-filter-compact select.alpro-input {
     min-height: 0 !important;
     height: auto !important;
-    padding-top: 4px !important;
-    padding-bottom: 4px !important;
+    padding-top: 3px !important;
+    padding-bottom: 3px !important;
     line-height: 1.2 !important;
 }
-.aap-filter-compact .alpro-btn { padding: 4px 12px; font-size: 12px; }
+.aap-filter-compact .alpro-btn { padding: 3px 10px; font-size: 11px; }
 .aap-filter-compact .alpro-actions { flex-wrap: nowrap; justify-self: end; margin-left: auto; }
 .aap-filter-compact .alpro-actions .alpro-btn { flex: 0 0 auto; white-space: nowrap; }
 
@@ -260,23 +271,40 @@
 .aap-ct-level { display: grid; gap: 14px; margin-bottom: 16px; }
 .aap-ct-level-1 { grid-template-columns: repeat(4, 1fr); }
 .aap-ct-level-2 { grid-template-columns: 1fr 1fr; }
-.aap-ct-level-2 #ct_approver_mode, .aap-ct-level-2 #ct_ops_tier_required { max-width: 340px; }
-.aap-ct-level-2 #ct_pool_staff_field { grid-column: 1 / -1; flex-direction: row; gap: 20px; }
-.aap-ct-level-2 #ct_pool_staff_field > div { flex: 1; min-width: 0; margin-bottom: 0; }
-.ct-pool-row > span:first-child { min-width: 140px; white-space: nowrap; }
-@media (max-width: 700px) { .aap-ct-level-2 { grid-template-columns: 1fr; } .aap-ct-level-2 #ct_pool_staff_field { flex-direction: column; } }
+@media (max-width: 700px) { .aap-ct-level-2 { grid-template-columns: 1fr; } }
 .aap-ct-level-3 { grid-template-columns: repeat(2, 1fr); }
 .aap-ct-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .aap-ct-field label { font-weight: 600; color: #343a40; font-size: 13px; }
 .aap-ct-field .alpro-input { width: 100%; padding: 4px 8px !important; min-height: 0 !important; height: auto !important; font-size: 13px; line-height: 1.3 !important; }
 .aap-ct-field-inline { display: flex; align-items: center; gap: 8px; padding-top: 2px; }
-.aap-ct-level-title { font-size: 11px; font-weight: 700; color: #6c757d; text-transform: uppercase; letter-spacing: .04em; margin: 0 0 8px; }
+.aap-ct-level-title { font-size: 11px; font-weight: 700; color: #6c757d; text-transform: uppercase; letter-spacing: .04em; margin: 18px 0 8px; padding-top: 14px; border-top: 1px solid #e5e9ec; }
+.aap-ct-level-title:first-of-type { margin-top: 0; padding-top: 0; border-top: none; }
 @media (max-width: 900px) { .aap-ct-level-1, .aap-ct-level-3 { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 560px) { .aap-ct-level-1, .aap-ct-level-3 { grid-template-columns: 1fr; } }
 
 .aap-ct-list-table th, .aap-ct-list-table td { padding: 5px 10px !important; font-size: 12px; }
 .aap-ct-list-table .alpro-badge { padding: 1px 8px; font-size: 10px; }
 .aap-ct-list-table .alpro-btn { padding: 3px 8px !important; font-size: 11px !important; }
+
+/* Shared "Show N entries" pagination bar - used by every paginated list in
+   this module (admin/aap_grouping_master.php's Department Tiers,
+   admin/aap_admin.php's Case Type Registry, and any future one). Defined
+   once here so every page's pagination looks and behaves identically
+   instead of each page duplicating its own inline styles. */
+.aap-pagination-bar { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; flex-wrap: wrap; gap: 10px; border-top: 1px solid #e5e9ec; padding-top: 12px; }
+.aap-pagination-bar .aap-page-size-group { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #495057; }
+.aap-pagination-bar .aap-page-size-select { width: auto; padding: 3px 6px !important; min-height: 0 !important; height: auto !important; font-size: 12px !important; }
+.aap-pagination-bar .aap-page-info { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.aap-page-showing { font-size: 13px; color: #6c757d; }
+.aap-page-numbers { display: flex; gap: 4px; align-items: center; }
+
+/* Shared filter bar - the search/dropdown row above a paginated list
+   (Department Tiers search, Case Type Registry filters, and any future
+   one) so every page's filter controls are the same compact size instead
+   of each page duplicating its own override. Layout (grid vs single input)
+   stays per-page; only the control sizing/spacing is shared. */
+.aap-filter-bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.aap-filter-input { padding: 4px 8px !important; min-height: 0 !important; height: auto !important; font-size: 12px !important; }
 
 /* ===================== aap_access.php ===================== */
 .aap-access-section { margin-bottom: 20px; }

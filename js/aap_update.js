@@ -69,7 +69,6 @@ document.addEventListener('DOMContentLoaded', function () {
     var viewEl = document.getElementById('case-view');
     var editEl = document.getElementById('case-edit');
     var actionsEl = document.getElementById('case-edit-actions');
-    var saveBtn = document.getElementById('case-edit-save');
 
     // Only present when $can_edit_case (aap_update.php) rendered this
     // section - other viewers get none of these elements.
@@ -80,15 +79,17 @@ document.addEventListener('DOMContentLoaded', function () {
     // requester instead clicks Save Changes, re-parent them into the
     // case-edit form right before it submits so whatever they typed/picked
     // rides along in that request too, instead of being silently dropped.
-    if (saveBtn) {
-        saveBtn.addEventListener('click', function () {
-            var caseEditForm = document.getElementById('case-edit');
-            var noteInput = document.querySelector('#evidence-add-form textarea[name="new_note"]');
-            var fileInput = document.getElementById('evidence-file-input');
-            if (caseEditForm && noteInput) caseEditForm.appendChild(noteInput);
-            if (caseEditForm && fileInput) caseEditForm.appendChild(fileInput);
-        });
-    }
+    // Done on the form's "submit" event (not the button's "click") so it
+    // only fires once the browser's own required-field validation has
+    // actually passed - on a click that native validation blocks, the
+    // fields must stay put instead of visibly jumping into the edit form
+    // and being left stranded there.
+    editEl.addEventListener('submit', function () {
+        var noteInput = document.querySelector('#evidence-add-form textarea[name="new_note"]');
+        var fileInput = document.getElementById('evidence-file-input');
+        if (noteInput) editEl.appendChild(noteInput);
+        if (fileInput) editEl.appendChild(fileInput);
+    });
 
     var deleteForms = document.querySelectorAll('.attachment-delete-form');
     var noteActions = document.querySelectorAll('.note-actions');

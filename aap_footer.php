@@ -8,6 +8,20 @@
 <?php if (isset($page_js) && $page_js !== ''): ?>
 <script src="<?php echo $page_js; ?>?v=<?php echo time(); ?>"></script>
 <?php endif; ?>
+<script>
+// lock_adv.php's top-bar icons (back/home/forward/smiley/noti/setting/lock2/
+// T&C/help/exit) are hardcoded as "../../odb/common/img/*.png" - only correct
+// when the current page sits exactly one folder under odb/. Every page under
+// this module's admin/ folder is two folders deep, so that relative path
+// resolves short and 404s. Not our file to edit (shared outer-app
+// lock_adv.php, not part of this repo) - rewrite the broken <img> src to the
+// equivalent absolute path instead, on every AAP page for consistency.
+document.querySelectorAll('img[src*="../../odb/common/img/"]').forEach(function (img) {
+    var raw = img.getAttribute('src');
+    var file = raw.split('/').pop();
+    img.setAttribute('src', '/odb/common/img/' + file);
+});
+</script>
 <?php
 // Same $aap_base convention as aap_modern_head.php/aap_sidebar.php - a page
 // one level deeper than aap/ (admin/*.php) sets $aap_base = '../' before

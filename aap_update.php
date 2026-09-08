@@ -14,7 +14,7 @@ if (!isset($conn) || !($conn instanceof mysqli)) {
 require_once('aap_lib.php');
 
 $aap_dept_ids = aapDeptIdsFromCsv($department);
-$aap_is_admin = aapIsAdmin($grade, $aap_dept_ids, aapFetchIsSuperAdmin($conn, $id_user));
+$aap_is_admin = aapIsAdmin($grade, $aap_dept_ids, aapFetchIsSuperAdmin($conn, $id_user), aapFetchAapLevel($conn, $id_user));
 
 $id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
 $case = $id ? aapFetchCase($conn, $id) : null;
@@ -58,14 +58,22 @@ $ct = aapFetchCaseType($conn, $case['case_type_id']);
 $fixit_record = !empty($case['fixit_record_id']) ? aapFetchFixitRecord($conn, $case['fixit_record_id']) : null;
 $fixit_attachments = !empty($case['fixit_record_id']) ? aapFetchFixitAttachments($conn, $case['fixit_record_id']) : [];
 
-$can_tag_physical = ($case['requester_type'] === 'outlet' || $case['requester_type'] === 'customer') && ((int)$case['created_by'] === (int)$id_user || aapIsOperations($aap_dept_ids) || $aap_is_admin);
+// Only while the case is still active (draft/open) - a rejected/voided/
+// closed case is terminal and must not accept a physical tag/confirm after
+// the fact, even though physical_confirm_status itself may still read
+// 'pending' (voiding a case never touches that field).
+$can_tag_physical = in_array($case['case_status'], ['draft', 'open'], true)
+    && ($case['requester_type'] === 'outlet' || $case['requester_type'] === 'customer') && ((int)$case['created_by'] === (int)$id_user || aapIsOperations($aap_dept_ids) || $aap_is_admin);
 
-// Approval eligibility is now a single per-staff RM ceiling (aap_staff_thresholds,
-// set from aap_admin.php) instead of grade-based Executive/Manager tiers or
-// CS Level 1/2 - see aapCanApprove(). $case['ops_tier_required'] is the one
-// remaining grade-based knob: an optional Executive/Manager floor applied
-// only to an Operations (non-CS) approver on a cs_tier case.
-$can_act_approval = aapCanApprove($conn, $id_user, $aap_dept_ids, $case['approver_mode'], $case['requester_department_id'], $case['calculated_value'], $aap_is_admin, $grade, $case['ops_tier_required']);
+// Approval eligibility is now per-Case-Type: a staff member must be on that
+// Case Type's Approval Staff Tier list (Level 2, admin/aap_admin.php) with a
+// tier covering the case's value, and not on its Exclusion list (Level 3) -
+// see aapCanApprove(). Customer Support is the one deliberate exception -
+// they raise and self-handle their own cases at any value, so the person who
+// raised it can always act on it if they're Customer Support, without
+// needing to be on the Case Type's Staff Tier list at all.
+$can_act_approval = (aapIsCustomerSupport($aap_dept_ids) && (int)$case['created_by'] === (int)$id_user)
+    || aapCanApprove($conn, $id_user, $case['case_type_id'], $case['calculated_value'], $aap_is_admin);
 $can_execute = aapCanExecute($grade, $aap_dept_ids, $aap_is_admin);
 $can_close   = $aap_is_admin || aapIsOperations($aap_dept_ids) || (int)$case['created_by'] === (int)$id_user;
 $can_void    = (in_array($case['case_status'], ['draft', 'open'], true) && $case['approval_status'] === 'pending')
@@ -131,7 +139,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             // at the Approval Gate, so tell whoever's eligible to act on it
             // now instead of waiting for the tag_physical step below.
             if (!$case['physical_confirm_required']) {
-                $eligible = aapFetchEligibleApproverIds($conn, $case['approver_mode'], $case['requester_department_id'], $case['calculated_value'], $case['ops_tier_required']);
+                $eligible = aapFetchEligibleApproverIds($conn, $case['case_type_id'], $case['calculated_value']);
                 foreach ($eligible as $approver_id) {
                     aapNotifyStaff($conn, $id, $approver_id, 'pending_approval');
                 }
@@ -154,7 +162,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             // Physical confirmation was the last thing standing between this
             // case and the Approval Gate - tell whoever's eligible it's their
             // turn now.
-            $eligible = aapFetchEligibleApproverIds($conn, $case['approver_mode'], $case['requester_department_id'], $case['calculated_value'], $case['ops_tier_required']);
+            $eligible = aapFetchEligibleApproverIds($conn, $case['case_type_id'], $case['calculated_value']);
             foreach ($eligible as $approver_id) {
                 aapNotifyStaff($conn, $id, $approver_id, 'pending_approval');
             }
@@ -185,6 +193,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $stmt->execute(); $stmt->close();
                 aapLogAudit($conn, $id, 'case_rejected', $id_user, "Rejected" . ($remark ? " — $remark" : ""));
                 aapNotifyStaff($conn, $id, (int)$case['created_by'], 'case_rejected');
+                // AAP-LINK: case ends negatively - auto-cancel the linked Fixit
+                // ticket instead of leaving it stuck Pending forever.
+                if (!empty($case['fixit_record_id'])) {
+                    aapCancelLinkedFixitTicket($conn, $case['fixit_record_id'], $id_user);
+                }
                 $msg = "Case rejected. Requester notified."; $msg_type = "alpro-success";
             }
         }
@@ -202,6 +215,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             // complete/close the matching status on their end in Fixit, if
             // this case was linked from there.
             aapNotifyStaff($conn, $id, (int)$case['created_by'], 'case_closed');
+            // AAP-LINK: case closes here - auto-complete the linked Fixit
+            // ticket instead of relying on the requester to go complete it by
+            // hand after getting the "case closed" notification.
+            if (!empty($case['fixit_record_id'])) {
+                aapCompleteLinkedFixitTicket($conn, $case['fixit_record_id'], $id_user);
+            }
             $msg = "Case executed and closed. Requester notified."; $msg_type = "alpro-success";
         }
     } elseif ($action === 'edit_case' && $can_edit_case) {
@@ -212,9 +231,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         } else {
             // Requester Type / Requesting Channel are no longer collected on
             // this form (removed to match aap_add.php) - Requester Type falls
-            // back to the Case Type's own default; Requesting Channel keeps
-            // whatever the case already had.
-            $requester_type         = in_array($_POST['requester_type'] ?? null, ['customer', 'outlet', 'bu'], true) ? $_POST['requester_type'] : $new_ct['default_requester_type'];
+            // back to 'customer' (Case Type no longer carries its own
+            // default_requester_type); Requesting Channel keeps whatever the
+            // case already had.
+            $requester_type         = in_array($_POST['requester_type'] ?? null, ['customer', 'outlet', 'bu'], true) ? $_POST['requester_type'] : 'customer';
             $requesting_channel     = $case['requesting_channel'];
             $customer_membership_id = trim($_POST['customer_membership_id']);
             $transaction_ref        = trim($_POST['transaction_ref']);
@@ -224,8 +244,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
             $new_physical_required = (int)$new_ct['physical_confirm_required'];
             $new_physical_status   = $new_physical_required ? 'pending' : 'not_required';
-            $new_approver_mode     = $new_ct['approver_mode'];
-            $new_ops_tier_required = $new_ct['ops_tier_required'];
 
             // evidence_note itself is no longer edited here - it's the original
             // note captured at case creation. New notes go into aap_case_notes
@@ -235,15 +253,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 UPDATE aap_cases SET
                     case_type_id=?, requester_type=?, requesting_channel=?, customer_membership_id=?, transaction_ref=?,
                     calculated_value=?, value_type=?, recommended_outcome=?,
-                    physical_confirm_required=?, physical_confirm_status=?, approver_mode=?, ops_tier_required=?,
+                    physical_confirm_required=?, physical_confirm_status=?,
                     updated_at=?
                 WHERE id=?
             ");
             $stmt->bind_param(
-                "issssdssissssi",
+                "issssdssissi",
                 $case_type_id, $requester_type, $requesting_channel, $customer_membership_id, $transaction_ref,
                 $calculated_value, $value_type, $recommended_outcome,
-                $new_physical_required, $new_physical_status, $new_approver_mode, $new_ops_tier_required,
+                $new_physical_required, $new_physical_status,
                 $now, $id
             );
             $stmt->execute(); $stmt->close();
@@ -259,7 +277,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 aapLogAudit($conn, $id, 'note_added', $id_user, "Added a note");
             }
 
-            aapLogAudit($conn, $id, 'case_edited', $id_user, "Case details updated (" . $new_ct['name'] . ")");
+            aapLogAudit($conn, $id, 'case_edited', $id_user, "Case details updated (" . $new_ct['case_type_name'] . ")");
             $msg = "Case details updated."; $msg_type = "alpro-success";
         }
     } elseif ($action === 'add_evidence' && $can_edit_case) {
@@ -336,9 +354,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         $stmt->execute(); $stmt->close();
         aapLogAudit($conn, $id, 'case_closed', $id_user, "Case closed and requester notified.");
         // Notify the requester who raised the case - even if they're also the
-        // one closing it themselves - so they know to also complete/close the
-        // matching status on their end in Fixit, if this case was linked from there.
+        // one closing it themselves.
         aapNotifyStaff($conn, $id, (int)$case['created_by'], 'case_closed');
+        // AAP-LINK: auto-complete the linked Fixit ticket instead of relying
+        // on the requester to go complete it by hand.
+        if (!empty($case['fixit_record_id'])) {
+            aapCompleteLinkedFixitTicket($conn, $case['fixit_record_id'], $id_user);
+        }
         $msg = "Case closed."; $msg_type = "alpro-success";
     } elseif ($action === 'void_case' && $can_void) {
         $void_reason = trim($_POST['void_reason'] ?? '');
@@ -346,6 +368,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         $stmt->bind_param("ssi", $now, $now, $id);
         $stmt->execute(); $stmt->close();
         aapLogAudit($conn, $id, 'case_voided', $id_user, "Case voided" . ($void_reason ? " — $void_reason" : ""));
+        // AAP-LINK: case ends negatively - auto-cancel the linked Fixit
+        // ticket instead of leaving it stuck Pending forever.
+        if (!empty($case['fixit_record_id'])) {
+            aapCancelLinkedFixitTicket($conn, $case['fixit_record_id'], $id_user);
+        }
         $msg = "Case voided."; $msg_type = "alpro-success";
     } else {
         $msg = "This action is not available for the case's current state, or you don't have permission to perform it.";
@@ -364,7 +391,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 // ---- SOP progress stepper — Raised -> [Physical Confirm] -> Approval -> Execution -> Closed ----
 $aap_steps = [];
 if ($case['case_status'] === 'draft') {
-    $aap_steps[] = ['label' => 'Draft', 'sub' => 'Gathering evidence', 'state' => 'current'];
+    $aap_steps[] = ['label' => 'Open', 'sub' => 'Gathering evidence', 'state' => 'current'];
 } else {
     $aap_steps[] = ['label' => 'Raised', 'sub' => '', 'state' => 'done'];
 }
@@ -377,12 +404,10 @@ if ($case['physical_confirm_required']) {
 
 if ($case['case_status'] === 'draft') {
     $astate = 'upcoming'; $asub = '';
-} elseif ($case['case_status'] === 'rejected') {
+} elseif (in_array($case['case_status'], ['rejected', 'voided'], true)) {
     $astate = 'failed'; $asub = 'Rejected';
-} elseif ($case['case_status'] === 'voided') {
-    $astate = 'failed'; $asub = 'Voided';
 } elseif (in_array($case['approval_status'], ['approved', 'corrected'], true)) {
-    $astate = 'done'; $asub = ucfirst($case['approval_status']);
+    $astate = 'done'; $asub = 'Approved';
 } elseif ($case['approval_status'] === 'pending') {
     $astate = $physical_ready ? 'current' : 'upcoming';
     $asub = $physical_ready ? aapFormatValue($case['calculated_value'], $case['value_type']) : '';
@@ -391,20 +416,14 @@ if ($case['case_status'] === 'draft') {
 }
 $aap_steps[] = ['label' => 'Approval', 'sub' => $asub, 'state' => $astate];
 
+// Execution and Closed are shown as one step - executing a case now closes
+// it in the same action (see aap_update.php's 'execute' action), so there's
+// no meaningfully distinct "executed but not yet closed" state left to show.
 if (in_array($case['case_status'], ['rejected', 'voided'], true)) {
-    $estate = 'upcoming';
-} elseif ($case['execution_status'] === 'executed') {
-    $estate = 'done';
-} elseif (in_array($case['approval_status'], ['approved', 'corrected'], true) && $case['execution_status'] === 'pending') {
-    $estate = 'current';
-} else {
-    $estate = 'upcoming';
-}
-$aap_steps[] = ['label' => 'Execution', 'sub' => '', 'state' => $estate];
-
-if ($case['case_status'] === 'closed') {
+    $cstate = 'upcoming';
+} elseif (in_array($case['case_status'], ['closed', 'executed'], true)) {
     $cstate = 'done';
-} elseif ($case['case_status'] === 'executed') {
+} elseif (in_array($case['approval_status'], ['approved', 'corrected'], true) && $case['execution_status'] === 'pending') {
     $cstate = 'current';
 } else {
     $cstate = 'upcoming';
@@ -430,7 +449,8 @@ $audit_logs = aapFetchAuditLogs($conn, $id);
 // instead of raw case_status, for this page's OKR-style status chip.
 $case_display_status = aapCaseDisplayStatus($case);
 $case_pill = 'aap-pill-' . $case_display_status['slug'];
-$approval_pill = 'aap-pill-' . $case['approval_status'];
+$approval_status_display = aapApprovalStatusDisplay($case['approval_status']);
+$approval_pill = 'aap-pill-' . $approval_status_display['slug'];
 ?>
 
 <?php include('aap_modern_head.php'); ?>
@@ -555,7 +575,7 @@ $approval_pill = 'aap-pill-' . $case['approval_status'];
 
                     <div class="alpro-grid alpro-mt-10">
                         <div class="alpro-field" style="grid-column: 1 / -1;">
-                            <label>Recommended Outcome</label>
+                            <label>Remark</label>
                             <div style="height:80px; max-height:400px; overflow-y:auto; resize:vertical; border:1px solid #e5e9ec; border-radius:6px; padding:8px 10px; background:#fff;"><?php echo nl2br(htmlspecialchars($case['recommended_outcome'] ?: '—')); ?></div>
                         </div>
                     </div>
@@ -570,7 +590,7 @@ $approval_pill = 'aap-pill-' . $case['approval_status'];
                             <label>Case Type <span class="aap-req">*</span></label>
                             <select class="alpro-input" name="case_type_id" id="edit_case_type_id" required>
                                 <?php foreach ($edit_case_types as $ect): ?>
-                                    <option value="<?php echo $ect['id']; ?>" <?php echo ($case['case_type_id'] == $ect['id']) ? 'selected' : ''; ?>><?php echo htmlspecialchars($ect['name']); ?></option>
+                                    <option value="<?php echo $ect['id']; ?>" <?php echo ($case['case_type_id'] == $ect['id']) ? 'selected' : ''; ?>><?php echo htmlspecialchars($ect['case_type_name']); ?></option>
                                 <?php endforeach; ?>
                             </select>
                         </div>
@@ -617,15 +637,14 @@ $approval_pill = 'aap-pill-' . $case['approval_status'];
             <div class="aap-card">
                 <h6 class="aap-card-title"><i class="bi bi-shield-check"></i> Approval Gate</h6>
                 <p style="margin: 0 0 4px; line-height:2;">
-                    Mode: <strong><?php echo aapApproverModeLabel($case['approver_mode']); ?></strong>
-                    <br>Value: <span class="aap-pill" style="background:#e7f1ff; color:#0d6efd;"><?php echo aapFormatValue($case['calculated_value'], $case['value_type']); ?></span>
-                    <span class="aap-info-icon">i<span class="aap-tooltip">Approvable only by staff with a personal RM ceiling covering this value.</span></span>
-                    <span style="margin-left:24px;">Status:</span> <span class="aap-pill <?php echo $approval_pill; ?>"><?php echo ucfirst($case['approval_status']); ?></span>
+                    Value: <span class="aap-pill" style="background:#e7f1ff; color:#0d6efd;"><?php echo aapFormatValue($case['calculated_value'], $case['value_type']); ?></span>
+                    <span class="aap-info-icon">i<span class="aap-tooltip">Approvable only by staff on this Case Type's Approval Staff Tier list, with a tier covering this value.</span></span>
+                    <span style="margin-left:24px;">Status:</span> <span class="aap-pill <?php echo $approval_pill; ?>"><?php echo htmlspecialchars($approval_status_display['label']); ?></span>
                 </p>
                 <?php if ($case['approver_name']): ?>
                     <?php $value_was_adjusted = $case['approved_value'] !== null && abs((float)$case['approved_value'] - (float)$case['calculated_value']) > 0.001; ?>
                     <p class="aap-meta-line">
-                        <?php echo ucfirst($case['approval_status']); ?> by <?php echo htmlspecialchars($case['approver_name']); ?> on <?php echo date('d-m-Y H:i', strtotime($case['approved_at'])); ?>
+                        <?php echo htmlspecialchars($approval_status_display['label']); ?> by <?php echo htmlspecialchars($case['approver_name']); ?> on <?php echo date('d-m-Y H:i', strtotime($case['approved_at'])); ?>
                         <?php if ($case['approved_value'] !== null): ?>
                             — Approved value:
                             <?php if ($value_was_adjusted): ?>
@@ -651,7 +670,7 @@ $approval_pill = 'aap-pill-' . $case['approval_status'];
                         <?php else: ?>
                             <form method="post" action="" class="alpro-mt-10" onsubmit="return confirm('Open this case? It will move into the approval workflow.');">
                                 <input type="hidden" name="action" value="open_case">
-                                <button class="alpro-btn" type="submit" style="width:100%; padding:6px 10px; font-size:12px; background:#198754; color:#fff;"><i class="bi bi-unlock"></i> Open Case</button>
+                                <button class="alpro-btn alpro-btn-blue" type="submit" style="width:100%; padding:6px 10px; font-size:12px;"><i class="bi bi-unlock"></i> Open Case</button>
                             </form>
                         <?php endif; ?>
                     <?php endif; ?>
@@ -660,35 +679,27 @@ $approval_pill = 'aap-pill-' . $case['approval_status'];
                 <?php elseif ($case['approval_status'] === 'pending' && $can_act_approval): ?>
                     <form method="post" action="" class="alpro-mt-10">
                         <div class="alpro-grid">
+                            <div class="alpro-field" style="grid-column: 1 / -1;"><label>Approved Value <span class="aap-muted" style="font-weight:normal; font-size:11px; text-transform:uppercase;">(adjust if needed)</span></label><input class="alpro-input" type="number" step="0.01" min="0" name="approved_value" value="<?php echo htmlspecialchars($case['calculated_value']); ?>"></div>
                             <div class="alpro-field" style="grid-column: 1 / -1;">
                                 <label>Remark</label>
                                 <textarea class="alpro-input" name="approval_remark" id="approval-remark-input" placeholder="Reason / notes" style="height:60px; max-height:150px; resize:vertical; overflow-y:auto;"><?php echo htmlspecialchars($case['approval_remark'] ?? ''); ?></textarea>
                                 <div style="text-align:right;"><span id="approval-remark-status" style="font-size:11px; color:#6c757d;"></span></div>
                             </div>
-                            <div class="alpro-field" style="grid-column: 1 / -1;"><label>Approved Value <span class="aap-muted" style="font-weight:normal;">(adjust if needed)</span></label><input class="alpro-input" type="number" step="0.01" min="0" name="approved_value" value="<?php echo htmlspecialchars($case['calculated_value']); ?>"></div>
                         </div>
                         <hr style="border:none; border-top:1px solid #e5e9ec; margin:10px 0;">
                         <div class="alpro-actions" style="flex-direction:row; flex-wrap:wrap; gap:4px;">
                             <button class="alpro-btn alpro-btn-blue" type="submit" name="action" value="approve" title="Approve" onclick="return confirm('Approve this case?');" style="flex:1; min-width:0; padding:4px 6px; font-size:11px;"><i class="bi bi-check-lg"></i> Approve</button>
-                            <button class="alpro-btn" type="submit" name="action" value="reject" onclick="return confirm('Reject this case?');" style="background:#dc3545; color:#fff; border:none; flex:1; min-width:0; padding:4px 6px; font-size:11px;"><i class="bi bi-x-lg"></i> Reject</button>
+                            <button class="alpro-btn" type="submit" name="action" value="reject" onclick="return confirm('Reject this case?');" style="flex:1; min-width:0; padding:4px 6px; font-size:11px; background:#dc3545; color:#fff; border:none;"><i class="bi bi-x-lg"></i> Reject</button>
                         </div>
                     </form>
-                <?php elseif ($case['approval_status'] === 'pending'):
-                    if ($case['approver_mode'] === 'bu_signoff') {
-                        $awaiting = 'the owning Business Unit';
-                    } elseif ($case['approver_mode'] === 'cs_tier') {
-                        $awaiting = 'Customer Support or Operations with sufficient approval ceiling';
-                    } else {
-                        $awaiting = 'Operations with sufficient approval ceiling';
-                    }
-                ?>
-                    <p class="aap-card-hint" style="margin-top:12px;">Awaiting decision by <?php echo $awaiting; ?>.</p>
+                <?php elseif ($case['approval_status'] === 'pending'): ?>
+                    <p class="aap-card-hint" style="margin-top:12px;">Awaiting decision by this Case Type's assigned Approval staff.</p>
                 <?php endif; ?>
             </div>
 
             <?php if ((int)$case['physical_confirm_required'] === 1): ?>
             <div class="aap-card" style="margin-top:15px;">
-                <h6 class="aap-card-title"><i class="bi bi-box-seam"></i> Physical Return Confirmation</h6>
+                <h6 class="aap-card-title"><i class="bi bi-box-seam"></i> Return Confirmation</h6>
                 <p style="margin: 0 0 4px;">Status: <strong><?php echo aapPhysicalStatusLabel($case['physical_confirm_status']); ?></strong></p>
                 <?php if ($case['physical_confirm_ref']): ?>
                     <p class="aap-meta-line">Ref: <span class="alpro-mono"><?php echo htmlspecialchars($case['physical_confirm_ref']); ?></span></p>
@@ -714,23 +725,23 @@ $approval_pill = 'aap-pill-' . $case['approval_status'];
 
             <?php if ($can_void): ?>
             <div class="aap-card" style="margin-top:15px;">
-                <h6 class="aap-card-title"><i class="bi bi-x-circle"></i> Void Case</h6>
+                <h6 class="aap-card-title"><i class="bi bi-x-circle"></i> Reject Case</h6>
                 <p class="aap-card-hint" style="margin:0 0 10px;">
-                    Voiding removes <?php echo htmlspecialchars($case['case_ref']); ?> (<?php echo htmlspecialchars($case['case_type_name']); ?>) from the active queue.
+                    Rejecting removes <?php echo htmlspecialchars($case['case_ref']); ?> (<?php echo htmlspecialchars($case['case_type_name']); ?>) from the active queue.
                     This is only possible before the case reaches a decision at the Approval Gate — it cannot be undone.
                 </p>
 
-                <button type="button" id="void-case-toggle" class="alpro-btn" style="background:#dc3545; color:#fff; border:none; width:100%; padding:6px 10px; font-size:12px;"><i class="bi bi-x-circle"></i> Void Case</button>
+                <button type="button" id="void-case-toggle" class="alpro-btn" style="width:100%; padding:6px 10px; font-size:12px; background:#fff; color:#212529; border:1px solid #000;"><i class="bi bi-x-circle"></i> Reject Case</button>
 
-                <form method="post" action="" id="void-case-form" style="display:none;" onsubmit="return confirm('Void this case? This cannot be undone.');">
+                <form method="post" action="" id="void-case-form" style="display:none;" onsubmit="return confirm('Reject this case? This cannot be undone.');">
                     <input type="hidden" name="action" value="void_case">
                     <div class="alpro-field">
                         <label>Reason</label>
-                        <textarea class="alpro-input" name="void_reason" style="height:80px;" placeholder="Why is this case being voided?"></textarea>
+                        <textarea class="alpro-input" name="void_reason" style="height:80px;" placeholder="Why is this case being rejected?"></textarea>
                     </div>
                     <div class="alpro-actions alpro-mt-10">
-                        <button class="alpro-btn" type="submit" style="background:#dc3545; color:#fff; border:none;"><i class="bi bi-check-lg"></i> Confirm Void</button>
-                        <button class="alpro-btn alpro-btn-grey" type="button" id="void-case-cancel"><i class="bi bi-x-lg"></i> Cancel</button>
+                        <button class="alpro-btn" type="submit" style="background:#dc3545; color:#fff; border:none; padding:8px 20px; font-size:14px; border-radius:8px;">Confirm Reject</button>
+                        <button class="alpro-btn" type="button" id="void-case-cancel" style="background:#fff; color:#212529; border:1px solid #000; padding:8px 20px; font-size:14px; border-radius:8px;">Cancel</button>
                     </div>
                 </form>
             </div>
@@ -888,8 +899,8 @@ $approval_pill = 'aap-pill-' . $case['approval_status'];
         <div class="aap-bento-item aap-span-12" id="case-edit-actions" style="display:none;">
             <div class="aap-card">
                 <div class="alpro-actions" style="justify-content:flex-end;">
-                    <button class="alpro-btn alpro-btn-grey" type="button" id="case-edit-cancel" style="flex:0 0 auto;"><i class="bi bi-x-lg"></i> Cancel</button>
-                    <button class="alpro-btn" type="submit" form="case-edit" id="case-edit-save" style="flex:0 0 auto; background:#198754; color:#fff;"><i class="bi bi-check-lg"></i> Save Changes</button>
+                    <button class="alpro-btn alpro-btn-blue" type="submit" form="case-edit" id="case-edit-save" style="flex:0 0 auto; padding:8px 20px; font-size:14px; border-radius:8px;">Save Changes</button>
+                    <button class="alpro-btn alpro-btn-grey" type="button" id="case-edit-cancel" style="flex:0 0 auto; padding:8px 20px; font-size:14px; border-radius:8px; border:1px solid #000;">Cancel</button>
                 </div>
             </div>
         </div>

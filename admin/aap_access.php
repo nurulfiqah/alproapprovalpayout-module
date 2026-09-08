@@ -9,7 +9,7 @@ if (!isset($conn) || !($conn instanceof mysqli)) {
 require_once('../aap_lib.php');
 
 $aap_dept_ids = aapDeptIdsFromCsv($department);
-$aap_is_admin = aapIsAdmin($grade, $aap_dept_ids, aapFetchIsSuperAdmin($conn, $id_user));
+$aap_is_admin = aapIsAdmin($grade, $aap_dept_ids, aapFetchIsSuperAdmin($conn, $id_user), aapFetchAapLevel($conn, $id_user));
 if (!$aap_is_admin) {
     die("Admin access only. This page documents the module's access model.");
 }
@@ -65,7 +65,7 @@ $aap_base = '../';
                 <tr>
                     <td><code>AAP_DEPT_CUSTOMER_SUPPORT</code></td>
                     <td>27</td>
-                    <td>Approval pool for <code>cs_tier</code>-mode Case Types, alongside Operations (see <code>aapCanApprove()</code> below) — a staff member still needs a personal RM ceiling to actually approve.</td>
+                    <td>Self-handle exception: a Customer Support staff member can always act on a case they raised themselves, at any value, without needing to be on that Case Type's Approval Staff Tier list — see <code>aapCanApprove()</code> below.</td>
                 </tr>
                 <tr>
                     <td><code>AAP_DEPT_DIGITAL_INNOVATION</code></td>
@@ -79,7 +79,21 @@ $aap_base = '../';
     <div class="aap-bento-item aap-span-12">
         <div class="aap-card aap-access-section">
             <h6 class="aap-card-title"><i class="bi bi-key"></i> Admin — <code>aapIsAdmin()</code></h6>
-            <p style="margin:10px 0 0;"><code>grade &gt;= 4</code> <strong>OR</strong> in Digital Innovation (dept 16) <strong>OR</strong> SuperAdmin (<code>staff.aap</code>/<code>okr</code>/<code>atem</code> = 1). Bypasses every other gate below.</p>
+            <p style="margin:10px 0 0;"><code>grade &gt;= 4</code> <strong>OR</strong> in Digital Innovation (dept 16) <strong>OR</strong> SuperAdmin (<code>staff.aap</code> = 2, or <code>okr</code>/<code>atem</code> = 1) <strong>OR</strong> <code>staff.aap</code> = 1 ("Admin 1"). Bypasses every other gate below.</p>
+        </div>
+    </div>
+
+    <div class="aap-bento-item aap-span-12">
+        <div class="aap-card aap-access-section">
+            <h6 class="aap-card-title"><i class="bi bi-shield-lock"></i> <code>staff.aap</code> is a LEVEL, not a flag</h6>
+            <p style="margin:10px 0 0;"><code>staff.aap</code> is 0 (no access), 1 ("Admin 1" — general admin), or 2 ("Admin 2" — full SuperAdmin) — same single leveled-column pattern already used elsewhere on <code>staff</code> (compare <code>atem</code>'s own 0/1 "normal user"/"superadmin" convention, extended here to a third level). Only level 2 counts toward the SuperAdmin union (<code>aapFetchIsSuperAdmin()</code>); level 1 only grants general <code>aapIsAdmin()</code> access, read via the separate <code>aapFetchAapLevel()</code>. An earlier design used a second column, <code>staff.aap_approval_unit</code>, to grant Admin 1 a narrower right without full SuperAdmin — dropped the same day in favour of this single leveled column, since two access columns for one module was more confusing than useful.</p>
+            <p style="margin:8px 0 0;">Three pages require the level-2 SuperAdmin union specifically, not just <code>aapIsAdmin()</code> — a level-1 Admin 1 does <strong>not</strong> get into any of them:</p>
+            <ul style="margin: 8px 0 0; padding-left: 20px; font-size: 14px; line-height: 1.9;">
+                <li><strong>admin/aap_grouping_master.php</strong> (Approval Unit Master) — sets every department's/Group's RM approval ceilings, including the shared Universal list.</li>
+                <li><strong>admin/aap_settings.php</strong> — grants/revokes <code>staff.aap</code> itself (via a level 0/1/2 picker, not a checkbox).</li>
+                <li><strong>admin/aap_staff_assignments.php</strong> — looks up/reassigns ANY staff member's Case Type Staff Tier assignments across every department.</li>
+            </ul>
+            <p style="margin:8px 0 0;">Their nav links (aap_sidebar.php) are hidden from anyone who isn't level-2 SuperAdmin, even a level-1 Admin 1.</p>
         </div>
     </div>
 
@@ -90,11 +104,12 @@ $aap_base = '../';
                 <tr><th>Function</th><th>Rule</th></tr>
                 <tr><td><code>aapIsOperations()</code></td><td>Member of Operations (dept 13).</td></tr>
                 <tr><td><code>aapIsCustomerSupport()</code></td><td>Member of Customer Support (dept 27).</td></tr>
-                <tr><td><code>aapIsAdmin()</code></td><td>Grade ≥ 4, Digital Innovation (dept 16), or SuperAdmin union (<code>staff.aap</code>/<code>okr</code>/<code>atem</code>).</td></tr>
-                <tr><td><code>aapFetchIsSuperAdmin()</code></td><td>Returns true if <code>staff.aap</code>, <code>staff.okr</code>, or <code>staff.atem</code> is 1 for the current user.</td></tr>
+                <tr><td><code>aapIsAdmin()</code></td><td>Grade ≥ 4, Digital Innovation (dept 16), SuperAdmin union, or <code>staff.aap</code> &gt;= 1.</td></tr>
+                <tr><td><code>aapFetchIsSuperAdmin()</code></td><td>Returns true if <code>staff.aap</code> = 2, or <code>staff.okr</code>/<code>atem</code> = 1, for the current user.</td></tr>
+                <tr><td><code>aapFetchAapLevel()</code></td><td>Returns the current user's raw <code>staff.aap</code> value (0/1/2).</td></tr>
                 <tr><td><code>aapCanExecute()</code></td><td>Admin, or Operations with grade ≥ 1 — regardless of the case's value.</td></tr>
-                <tr><td><code>aapGetStaffThreshold()</code></td><td>Reads the current user's personal RM approval ceiling from <code>aap_staff_thresholds</code>. Returns <code>null</code> for unlimited, <code>false</code> for no row (no approval rights at all), or the numeric ceiling.</td></tr>
-                <tr><td><code>aapCanApprove()</code></td><td>Admin, or (a) in the right pool for the case's Approver Mode — Operations for Operations Tier, Operations <strong>or</strong> Customer Support for CS Tier, same department as the requester for BU Sign-off — <strong>and</strong> (b) a personal RM ceiling (<code>aapGetStaffThreshold()</code>) that covers the case's calculated value. Replaced the old grade-based Operations tier, CS Level 1/2, and BU sign-off grade rule with one unified per-staff ceiling, set inline from the "Staff in Pool" panels on <code>aap_admin.php</code>'s Case Type form.</td></tr>
+                <tr><td><code>aapGetStaffThreshold()</code></td><td>Reads the current user's personal RM approval ceiling from <code>aap_staff_thresholds</code>. Returns <code>null</code> for unlimited, <code>false</code> for no row (no approval rights at all), or the numeric ceiling. Superseded by the per-Case-Type Staff Tier model below for approval decisions, but still used for the "Staff in Department" ceiling panel.</td></tr>
+                <tr><td><code>aapCanApprove()</code></td><td>Admin, or (a) explicitly on the Case Type's Approval Staff Tier list (Level 2, <code>aap_admin.php</code>'s Case Type form) with a tier (Unlimited / Tier 1 &gt; RM5,000 / Tier 2 &le; RM5,000) covering the case's value, and (b) not on that Case Type's Exclusion list (Level 3) — exclusion always wins. Replaced the old grade-based Operations tier / CS Level 1/2 / BU sign-off department rule entirely. Customer Support self-handling their own case is checked separately in <code>aap_update.php</code>, not inside this function.</td></tr>
                 <tr><td><code>aapScopeWhere()</code></td><td>Visibility filter for case lists — Admin/Operations see every case; everyone else sees only cases they raised or that were raised by their own department(s).</td></tr>
             </table>
         </div>
