@@ -37,26 +37,47 @@ draft → open → (confirm physical / approve / execute) → executed → close
 - **voided** — cancelled by the issuer/admin before reaching the approval
   gate.
 
+Execution can also **suspend** a case, kicking it back to Verification/
+Approval (with a reason logged); a case closed after a suspension shows as
+"Closed (Suspended)".
+
 Every state change is written to an audit log, and affected staff get an
 in-app notification.
 
 ## Access control
 
 Access is driven by the shared `staff` table (`grade`, `department`), plus a
-per-module SuperAdmin flag:
+per-module SuperAdmin flag and an explicit Department Manager grant:
 
 | Role | Who | Can do |
 |---|---|---|
 | **Admin** | grade ≥ 4, dept 16 (Digital Innovation), or SuperAdmin | Everything, bypasses approval pool/ceiling checks |
-| **Operations** | dept 13 | Tag/confirm physical returns, execute, close cases |
+| **Department Manager** | staff granted a department via `aap_department_managers` | Manage that department's Case Types, Approval Unit Groups, and Staff Assignments — additive only, never removes existing grade/department access |
+| **Operations** | dept 13 | Tag/confirm physical returns, execute, close (and suspend) cases |
 | **Customer Support** | dept 27 | Approve `cs_tier` case types (alongside Operations) |
-| **Approver** | staff with a threshold row in `aap_staff_thresholds` matching the case type's approver pool | Approve/reject up to their personal RM ceiling (null = unlimited) |
+| **Approver** | staff assigned a tier slot in `aap_case_type_staff_tiers`, resolved against `aap_approval_unit_tier_groups` | Approve/reject up to the RM ceiling of their assigned tier (Unlimited/Tier 4–0) |
 | **Everyone else** | any staff | Sees only cases they or their department raised |
 
-Case Types (approver pool, physical confirmation requirement, turnaround
-days) are managed in `admin/aap_admin.php`. The SuperAdmin roster is managed
-in `admin/aap_settings.php`. `admin/aap_access.php` is a read-only page
-documenting this access model.
+Approval authority is resolved through a tier system rather than a flat
+per-staff ceiling:
+
+- **Approval Unit Tiers** (`admin/aap_grouping_master.php`) — each department
+  has one or more named **Groups**, each holding a fixed 6-tier ladder
+  (Unlimited, Tier 4–0) with an RM value per tier. A department with no
+  Group of its own falls back to the shared "Universal" tier values.
+  Individual staff can be manually overridden to a different tier within a
+  Group.
+- **Case Type Registry** (`admin/aap_admin.php`) — each Case Type assigns
+  specific staff to specific tiers (`aap_case_type_staff_tiers`), which is
+  what actually grants approval rights for that Case Type.
+- **Staff Assignments** (`admin/aap_staff_assignments.php`) — lets a
+  superadmin (or a Department Manager, scoped to their department) look up a
+  staff member and reassign/remove every tier slot they hold at once — built
+  for offboarding.
+
+The SuperAdmin roster and Department Manager grants are managed in
+`admin/aap_settings.php` / `admin/aap_department_managers.php`.
+`admin/aap_access.php` is a read-only page documenting this access model.
 
 ## File overview
 
@@ -66,12 +87,19 @@ documenting this access model.
 | `aap_add.php` | Raise a new case (only reachable via a Fixit handoff) |
 | `aap_update.php` | Case detail page — open/tag/approve/execute/edit/close/void, notes, evidence upload/download |
 | `aap_delete.php` | Confirmation page to void a case |
+| `aap_export_cases.php` | CSV export of selected cases from the Case Queue (re-scoped to what the user can see) |
+| `aap_export_close_cases.php` | Bulk "Export & Close" — closes each selected `executed` case, then streams a CSV of the outcome |
 | `aap_notifications.php` | AJAX endpoint for the notification bell |
 | `aap_search_customer.php` | AJAX typeahead for customer membership ID |
 | `aap_sidebar.php` | Top nav + notification bell |
 | `aap_footer.php` / `aap_modern_head.php` | Shared layout include/close |
-| `aap_lib.php` | Core business logic — scoping, permissions, case queries, NAS uploads, audit logging |
-| `admin/` | Case Type registry, SuperAdmin roster, access-model docs |
+| `aap_lib.php` | Core business logic — scoping, permissions, tier/approval resolution, case queries, NAS uploads, audit logging |
+| `admin/aap_admin.php` | Case Type registry + per-Case-Type staff tier assignment |
+| `admin/aap_grouping_master.php` | Approval Unit Groups/Tiers per department |
+| `admin/aap_department_managers.php` | Grant/revoke Department Manager access |
+| `admin/aap_staff_assignments.php` | Look up a staff member and reassign/remove all their tier slots |
+| `admin/aap_settings.php` | SuperAdmin roster |
+| `admin/aap_access.php` | Read-only access-model documentation page |
 | `lib/synologynas.php` | Synology FileStation API client (not committed — see below) |
 | `sql/aap_master.sql` | Schema for all `aap_*` tables |
 
