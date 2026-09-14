@@ -8,15 +8,23 @@
 $current_page = basename($_SERVER['PHP_SELF']);
 $aap_base = $aap_base ?? '';
 $admin_prefix = ($aap_base === '') ? 'admin/' : '';
-// Admin ("Admin 2"/SuperAdmin) vs general aapIsAdmin ("Admin 1"):
-// aap_grouping_master.php (Approval Unit Master), aap_settings.php (grants
-// staff.aap itself), and aap_staff_assignments.php (looks up ANY staff
-// member's assignments across every department) are all SuperAdmin-only -
-// their nav links are hidden from a general admin who isn't also a
-// SuperAdmin, even though Settings (Case Type Registry) stays visible to
-// any $aap_is_admin.
+// staff.aap only has one admin level now (see aapFetchIsSuperAdmin() in
+// aap_lib.php) - any AAP admin (staff.aap = 1, or an OKR/ATEM SuperAdmin)
+// gets every nav link below, nothing held back. aap_grouping_master.php,
+// aap_settings.php, and aap_staff_assignments.php still gate on
+// $aap_is_superadmin_nav internally, but that now just means "is an AAP
+// admin" - kept as its own variable rather than renamed everywhere, since
+// aapFetchIsSuperAdmin() is still the union with OKR/ATEM's own SuperAdmin
+// flags, not purely an AAP-local concept.
 $aap_is_superadmin_nav = $aap_is_superadmin_nav ?? $aap_is_superadmin
     ?? (function_exists('aapFetchIsSuperAdmin') && isset($conn, $id_user) ? aapFetchIsSuperAdmin($conn, $id_user) : false);
+// aap_department_managers - a Department Manager (see
+// aapFetchDeptManagerDepartmentIds() in aap_lib.php) sees Approval Units and
+// Staff Assignments too, even without being a full AAP admin - both pages
+// scope what they can actually see/do to their own granted department(s).
+$aap_manager_dept_ids_nav = $aap_manager_dept_ids_nav ?? $aap_manager_dept_ids
+    ?? (function_exists('aapFetchDeptManagerDepartmentIds') && isset($conn, $id_user) ? aapFetchDeptManagerDepartmentIds($conn, $id_user) : []);
+$aap_can_see_dept_manager_pages_nav = $aap_is_superadmin_nav || !empty($aap_manager_dept_ids_nav);
 ?>
 <link rel="stylesheet" href="<?php echo $aap_base; ?>../common/css/layout.css">
 <link rel="stylesheet" href="<?php echo $aap_base; ?>../common/css/page.css">
@@ -32,13 +40,25 @@ $aap_is_superadmin_nav = $aap_is_superadmin_nav ?? $aap_is_superadmin
 
         <a href="<?php echo $aap_base; ?>index.php" class="alpro-btn <?php echo ($current_page == 'index.php') ? 'alpro-btn-blue' : 'alpro-btn-grey'; ?>" style="text-decoration: none;">Case Queue</a>
 
-        <?php if (!empty($aap_is_admin)): ?>
-        <a href="<?php echo $admin_prefix; ?>aap_admin.php" class="alpro-btn <?php echo ($current_page == 'aap_admin.php') ? 'alpro-btn-orange' : 'alpro-btn-grey'; ?>" style="text-decoration: none;">Settings</a>
+        <?php if (!empty($aap_is_admin) || $aap_can_see_dept_manager_pages_nav): ?>
+        <a href="<?php echo $admin_prefix; ?>aap_admin.php" class="alpro-btn <?php echo ($current_page == 'aap_admin.php') ? 'alpro-btn-orange' : 'alpro-btn-grey'; ?>" style="text-decoration: none;">Add Case Type</a>
+        <?php endif; ?>
+        <?php if ($aap_can_see_dept_manager_pages_nav): ?>
+        <a href="<?php echo $admin_prefix; ?>aap_grouping_master.php" class="alpro-btn <?php echo ($current_page == 'aap_grouping_master.php') ? 'alpro-btn-orange' : 'alpro-btn-grey'; ?>" style="text-decoration: none;">Approval Units</a>
+        <a href="<?php echo $admin_prefix; ?>aap_staff_assignments.php" class="alpro-btn <?php echo ($current_page == 'aap_staff_assignments.php') ? 'alpro-btn-orange' : 'alpro-btn-grey'; ?>" style="text-decoration: none;">Staff Assignments</a>
+        <!-- Viewable by a Department Manager now too (their own department's
+        grants only, no Grant Access form) - unlike Admin below, which stays
+        strictly admin-only since it's what grants that access in the first
+        place. $aap_can_see_dept_manager_pages_nav already includes every
+        SuperAdmin (it's "$aap_is_superadmin_nav || has a manager grant"), so
+        this single block covers both populations. -->
+        <a href="<?php echo $admin_prefix; ?>aap_department_managers.php" class="alpro-btn <?php echo ($current_page == 'aap_department_managers.php') ? 'alpro-btn-orange' : 'alpro-btn-grey'; ?>" style="text-decoration: none;">Department Managers</a>
         <?php endif; ?>
         <?php if ($aap_is_superadmin_nav): ?>
-        <a href="<?php echo $admin_prefix; ?>aap_grouping_master.php" class="alpro-btn <?php echo ($current_page == 'aap_grouping_master.php') ? 'alpro-btn-orange' : 'alpro-btn-grey'; ?>" style="text-decoration: none;">Approval Units</a>
+        <!-- Admin always stays the LAST button in this group, whatever else is
+        visible above it (Add Case Type/Approval Units/Staff Assignments/
+        Department Managers can each independently show or hide). -->
         <a href="<?php echo $admin_prefix; ?>aap_settings.php" class="alpro-btn <?php echo ($current_page == 'aap_settings.php') ? 'alpro-btn-orange' : 'alpro-btn-grey'; ?>" style="text-decoration: none;">Admin</a>
-        <a href="<?php echo $admin_prefix; ?>aap_staff_assignments.php" class="alpro-btn <?php echo ($current_page == 'aap_staff_assignments.php') ? 'alpro-btn-orange' : 'alpro-btn-grey'; ?>" style="text-decoration: none;">Staff Assignments</a>
         <?php endif; ?>
 
         <div style="margin-left: auto; display: flex; align-items: center; gap: 10px; position: relative;">

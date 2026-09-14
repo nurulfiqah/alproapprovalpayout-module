@@ -14,15 +14,13 @@
         }
     }
 
-    // staff.aap is a level (0/1/2), not a plain flag - see
-    // aapFetchAapLevel()/aapFetchIsSuperAdmin() in aap_lib.php.
+    // staff.aap is just a flag now (0/1) - see aapFetchAapLevel()/
+    // aapFetchIsSuperAdmin() in aap_lib.php.
     function levelLabel(level) {
-        if (level === 2) return 'Admin 2 (SuperAdmin)';
-        if (level === 1) return 'Admin 1';
-        return 'No Access';
+        return level === 1 ? 'Admin' : 'No Access';
     }
     function badge(level) {
-        var cls = level === 2 ? 'approved' : (level === 1 ? 'pending' : 'voided');
+        var cls = level === 1 ? 'approved' : 'voided';
         return '<span class="alpro-badge alpro-badge-' + cls + '">' + levelLabel(level) + '</span>';
     }
     function esc(s) {
@@ -178,4 +176,119 @@
     } catch (err) {
         showFatalError(err);
     }
+
+    // ---- Bank Master panel ----
+    (function () {
+        var tbody = document.getElementById('bank-tbody');
+        var addBtn = document.getElementById('bank-add-btn');
+        var newNameEl = document.getElementById('bank-new-name');
+        var alertEl = document.getElementById('bank-alert');
+        if (!tbody || !addBtn || !newNameEl || !alertEl) return;
+
+        function showAlert(success, message) {
+            alertEl.style.display = 'block';
+            alertEl.className = 'alpro-alert ' + (success ? 'alpro-success' : 'alpro-danger');
+            alertEl.textContent = message;
+        }
+
+        function loadBanks() {
+            tbody.innerHTML = '<tr><td colspan="3" align="center" style="padding:15px;">Loading...</td></tr>';
+            fetch('?action=list_banks').then(function (r) { return r.json(); }).then(function (res) {
+                if (!res.success) { tbody.innerHTML = '<tr><td colspan="3" align="center" style="padding:15px;">Failed to load.</td></tr>'; return; }
+                renderBanks(res.data);
+            }).catch(function () {
+                tbody.innerHTML = '<tr><td colspan="3" align="center" style="padding:15px;">Error loading data.</td></tr>';
+            });
+        }
+
+        function renderBanks(data) {
+            if (!data || !data.length) {
+                tbody.innerHTML = '<tr><td colspan="3" align="center" style="padding:15px;">No banks yet.</td></tr>';
+                return;
+            }
+            var html = '';
+            data.forEach(function (b) {
+                var retired = b.recycle === 1;
+                html += '<tr data-id="' + b.id + '">'
+                    + '<td><span class="bank-name-text">' + esc(b.bank_name) + '</span>'
+                    + '<input class="alpro-input bank-name-input" type="text" value="' + esc(b.bank_name) + '" style="display:none; max-width:280px;"></td>'
+                    + '<td>' + (retired ? '<span class="alpro-badge alpro-badge-voided">Retired</span>' : '<span class="alpro-badge alpro-badge-approved">Active</span>') + '</td>'
+                    + '<td>'
+                    + '<button type="button" class="alpro-btn alpro-btn-grey bank-rename-btn" style="padding:4px 10px; font-size:12px;">Rename</button> '
+                    + '<button type="button" class="alpro-btn ' + (retired ? 'alpro-btn-blue bank-restore-btn' : 'alpro-btn-grey bank-retire-btn') + '" style="padding:4px 10px; font-size:12px;">' + (retired ? 'Restore' : 'Retire') + '</button>'
+                    + '</td></tr>';
+            });
+            tbody.innerHTML = html;
+        }
+
+        addBtn.addEventListener('click', function () {
+            var name = newNameEl.value.trim();
+            if (name === '') { showAlert(false, 'Bank name is required.'); return; }
+            addBtn.disabled = true;
+            var body = new URLSearchParams();
+            body.set('action', 'add_bank');
+            body.set('bank_name', name);
+            fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function (res) {
+                showAlert(res.success, res.message || (res.success ? 'Added.' : 'Failed.'));
+                if (res.success) { newNameEl.value = ''; loadBanks(); }
+            }).catch(function () {
+                showAlert(false, 'Request failed. Please try again.');
+            }).finally(function () {
+                addBtn.disabled = false;
+            });
+        });
+        newNameEl.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') addBtn.click();
+        });
+
+        tbody.addEventListener('click', function (e) {
+            var row = e.target.closest('tr[data-id]');
+            if (!row) return;
+            var bankId = row.getAttribute('data-id');
+
+            var renameBtn = e.target.closest('.bank-rename-btn');
+            if (renameBtn) {
+                var nameSpan = row.querySelector('.bank-name-text');
+                var nameInput = row.querySelector('.bank-name-input');
+                if (renameBtn.textContent === 'Rename') {
+                    nameSpan.style.display = 'none';
+                    nameInput.style.display = 'inline-block';
+                    nameInput.focus();
+                    renameBtn.textContent = 'Save';
+                } else {
+                    var newName = nameInput.value.trim();
+                    if (newName === '') { showAlert(false, 'Bank name is required.'); return; }
+                    var body = new URLSearchParams();
+                    body.set('action', 'rename_bank');
+                    body.set('bank_id', bankId);
+                    body.set('bank_name', newName);
+                    fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function (res) {
+                        showAlert(res.success, res.message || (res.success ? 'Updated.' : 'Failed.'));
+                        if (res.success) loadBanks();
+                    }).catch(function () {
+                        showAlert(false, 'Request failed. Please try again.');
+                    });
+                }
+                return;
+            }
+
+            var retireBtn = e.target.closest('.bank-retire-btn');
+            var restoreBtn = e.target.closest('.bank-restore-btn');
+            if (retireBtn || restoreBtn) {
+                var recycle = retireBtn ? 1 : 0;
+                var body2 = new URLSearchParams();
+                body2.set('action', 'toggle_bank_recycle');
+                body2.set('bank_id', bankId);
+                body2.set('recycle', recycle);
+                fetch('', { method: 'POST', body: body2 }).then(function (r) { return r.json(); }).then(function (res) {
+                    showAlert(res.success, res.message || (res.success ? 'Updated.' : 'Failed.'));
+                    if (res.success) loadBanks();
+                }).catch(function () {
+                    showAlert(false, 'Request failed. Please try again.');
+                });
+            }
+        });
+
+        loadBanks();
+    })();
 })();

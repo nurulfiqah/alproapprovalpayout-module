@@ -6,7 +6,7 @@
 .aap-modern { text-align: left; margin-top: 15px; }
 
 /* Horizontal step progress tracker — shows where a case sits in the SOP
-   (Raised -> Physical Confirm -> Approval -> Execution -> Closed). */
+   (Raised -> Verification Required -> Approval -> Execution -> Closed). */
 .aap-stepper { display: flex; align-items: flex-start; margin-bottom: 0; }
 .aap-step { flex: 1; position: relative; text-align: center; }
 .aap-step::before {
@@ -46,7 +46,10 @@
 .aap-pill-confirming { background: #f39c12; }
 .aap-pill-pending_approval { background: #fd7e14; }
 .aap-pill-executing { background: #0dcaf0; color: #04323c; }
+.aap-pill-executing_suspended { background: #b8860b; }
+.aap-pill-closing { background: #20c997; color: #04322a; }
 .aap-pill-closed { background: #6c757d; }
+.aap-pill-closed_suspended { background: #b8860b; }
 .aap-pill-rejected { background: #dc3545; }
 .aap-pill-voided { background: #adb5bd; }
 .aap-pill-pending { background: #fd7e14; }
@@ -83,6 +86,15 @@
 
 .aap-modern .alpro-input { border: 1px solid #dcdfe3; border-radius: 8px; padding: 8px 12px; font-size: 14px; width: 100%; transition: border-color .15s, box-shadow .15s; }
 .aap-modern .alpro-input:focus { outline: none; border-color: #0d6efd; box-shadow: 0 0 0 3px rgba(13,110,253,.12); }
+/* A field that's readonly/disabled (e.g. Customer Name/Membership ID locked
+   after picking a search result, or a Case Type field an editor doesn't
+   have rights to touch) is greyed out here globally, so every such field
+   looks visibly locked without needing its own inline background style. */
+/* [readonly] (an actual attribute match), not the :read-only PSEUDO-CLASS -
+   :read-only also matches any control that isn't text-editable by nature at
+   all (select, file, checkbox...), which would grey out normal, fully
+   editable Value Type/Evidence Upload fields that never had readonly set. */
+.aap-modern .alpro-input[readonly], .aap-modern .alpro-input:disabled { background: #f1f3f5; color: #495057; cursor: not-allowed; }
 
 .aap-modern .alpro-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .aap-modern .alpro-actions .alpro-btn { flex: 1 1 140px; justify-content: center; white-space: nowrap; }

@@ -8,8 +8,13 @@ if (!isset($conn) || !($conn instanceof mysqli)) {
 }
 require_once('aap_lib.php');
 
-$aap_dept_ids = aapDeptIdsFromCsv($department);
-$aap_is_admin = aapIsAdmin($grade, $aap_dept_ids, aapFetchIsSuperAdmin($conn, $id_user), aapFetchAapLevel($conn, $id_user));
+// Resolves the SuperAdmin/admin-level union used across every AAP page.
+$aap_identity = aapResolveIdentity($conn, $id_user, $grade, $department);
+$grade = $aap_identity['grade'];
+$department = $aap_identity['department'];
+$aap_dept_ids = $aap_identity['dept_ids'];
+$aap_is_admin = $aap_identity['is_admin'];
+$aap_is_superadmin = $aap_identity['is_superadmin'];
 
 $id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
 $case = $id ? aapFetchCase($conn, $id) : null;
@@ -21,7 +26,7 @@ $can_void = (in_array($case['case_status'], ['draft', 'open'], true) && $case['a
             && ((int)$case['created_by'] === (int)$id_user || $aap_is_admin);
 
 if (!$can_void) {
-    die("This case can no longer be voided — it has already progressed past the Approval Gate, or you don't have permission.");
+    die("This case can no longer be voided — it has already progressed past the approval gate, or you don't have permission.");
 }
 
 $msg = "";
@@ -51,7 +56,7 @@ if (isset($_POST['confirm_void'])) {
 <div class="alpro-box alpro-mt-20" style="max-width:600px;">
     <div class="alpro-alert alpro-warn">
         Voiding removes <?php echo htmlspecialchars($case['case_ref']); ?> (<?php echo htmlspecialchars($case['case_type_name']); ?>) from the active queue.
-        This is only possible before the case reaches a decision at the Approval Gate — it cannot be undone.
+        This is only possible before the case reaches a decision at the approval gate — it cannot be undone.
     </div>
 
     <form method="post" action="">

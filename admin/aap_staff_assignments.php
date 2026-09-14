@@ -12,15 +12,41 @@ if (!isset($conn) || !($conn instanceof mysqli)) {
 }
 require_once('../aap_lib.php');
 
-// SuperAdmin-only ("Admin 2") - it can search/reassign ANY staff member's
-// Case Type Staff Tier assignments across every department, which is more
-// than the department-scoped access a general aapIsAdmin() ("Admin 1")
-// gets everywhere else in this module.
-$aap_dept_ids = aapDeptIdsFromCsv($department);
-$aap_is_superadmin = aapFetchIsSuperAdmin($conn, $id_user);
-$aap_is_admin = aapIsAdmin($grade, $aap_dept_ids, $aap_is_superadmin, aapFetchAapLevel($conn, $id_user));
-if (!$aap_is_superadmin) {
-    die("SuperAdmin access only. This page looks up every Case Type Staff Tier assignment a staff member holds.");
+// An AAP admin (staff.aap) can search/reassign ANY staff member's Case Type
+// Staff Tier assignments across every department - more than the
+// department-scoped access a general aapIsAdmin() gets everywhere else in
+// this module. A Department Manager (aap_department_managers, see
+// aapFetchDeptManagerDepartmentIds() in aap_lib.php) can also get in here
+// now, but every endpoint below scopes what they see/touch down to just
+// their own granted department(s)' assignment rows.
+$aap_identity = aapResolveIdentity($conn, $id_user, $grade, $department);
+$grade = $aap_identity['grade'];
+$department = $aap_identity['department'];
+$aap_dept_ids = $aap_identity['dept_ids'];
+$aap_is_admin = $aap_identity['is_admin'];
+$aap_is_superadmin = $aap_identity['is_superadmin'];
+$aap_level = $aap_identity['aap_level'];
+$aap_can_manage_all_depts = aapCanManageAllDepartments($grade, $aap_dept_ids, $aap_is_superadmin);
+
+// Merged in AFTER $aap_can_manage_all_depts is decided, same reasoning as
+// admin/aap_admin.php/aap_grouping_master.php - a grant here must never
+// accidentally read as "manage every department".
+$aap_manager_dept_ids = aapFetchDeptManagerDepartmentIds($conn, $id_user);
+if (!empty($aap_manager_dept_ids)) {
+    $aap_dept_ids = array_values(array_unique(array_merge($aap_dept_ids, $aap_manager_dept_ids)));
+}
+
+if (!$aap_is_superadmin && empty($aap_manager_dept_ids)) {
+    die("You don't have access to this page. Ask an admin to grant you SuperAdmin access, or Department Manager access for a specific department.");
+}
+
+// PHP's default session handler locks the session file for the whole
+// request - this page is hit repeatedly via AJAX below and never writes to
+// $_SESSION itself, so releasing the lock here lets those requests (and
+// everything else sharing this browser's session) run concurrently instead
+// of queuing up behind whichever one happens to be mid-request.
+if (session_status() === PHP_SESSION_ACTIVE) {
+    session_write_close();
 }
 
 // ---- Search staff by name - AJAX endpoint (JSON). Deliberately does NOT
@@ -85,6 +111,16 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_assignments' && $_SERVER[
         exit;
     }
 
+    // A Department Manager only ever sees this staff member's assignment
+    // rows whose OWN department_id (which department the tier row's Group
+    // belongs to) is one they manage - not every department the staff
+    // member happens to hold a slot in.
+    $dept_scope_sql = '';
+    if (!$aap_can_manage_all_depts) {
+        $dept_scope_sql = empty($aap_dept_ids)
+            ? ' AND 1=0'
+            : ' AND t.department_id IN (' . implode(',', array_map('intval', $aap_dept_ids)) . ')';
+    }
     $stmt = $conn->prepare("
         SELECT t.id, t.section, t.tier, t.department_id,
                ct.case_type_name, ct.recycle AS case_type_recycle,
@@ -92,7 +128,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_assignments' && $_SERVER[
         FROM aap_case_type_staff_tiers t
         INNER JOIN aap_case_types ct ON ct.id = t.case_type_id
         LEFT JOIN staff_department sd ON sd.id = t.department_id
-        WHERE t.staff_id = ?
+        WHERE t.staff_id = ? $dept_scope_sql
         ORDER BY ct.case_type_name ASC, t.section ASC
     ");
     $stmt->bind_param("i", $staff_id);
@@ -133,7 +169,18 @@ if (isset($_POST['action']) && $_POST['action'] === 'remove_assignment' && $_SER
         echo json_encode(['success' => false, 'message' => 'Invalid assignment.']);
         exit;
     }
+    $row = $conn->query("SELECT staff_id, case_type_id, section, department_id FROM aap_case_type_staff_tiers WHERE id = " . $row_id)->fetch_assoc();
+    if (!$row) {
+        echo json_encode(['success' => false, 'message' => 'Assignment not found.']);
+        exit;
+    }
+    if (!aapDeptInScope($row['department_id'], $aap_dept_ids, $aap_can_manage_all_depts)) {
+        echo json_encode(['success' => false, 'message' => 'You do not manage this department.']);
+        exit;
+    }
+    $ct_name = $conn->query("SELECT case_type_name FROM aap_case_types WHERE id = " . (int)$row['case_type_id'])->fetch_assoc()['case_type_name'] ?? 'Case Type #' . $row['case_type_id'];
     $conn->query("DELETE FROM aap_case_type_staff_tiers WHERE id = " . $row_id);
+    aapLogAdminAudit($conn, 'staff_assignments', 'assignment_removed', $id_user, (int)$row['staff_id'], "Removed {$row['section']} assignment on \"$ct_name\"");
     echo json_encode(['success' => true, 'message' => 'Removed.']);
     exit;
 }
@@ -155,10 +202,14 @@ if (isset($_POST['action']) && $_POST['action'] === 'change_assignment' && $_SER
         echo json_encode(['success' => false, 'message' => 'Staff not found.']);
         exit;
     }
-    $row = $conn->query("SELECT case_type_id, section FROM aap_case_type_staff_tiers WHERE id = $row_id");
+    $row = $conn->query("SELECT staff_id, case_type_id, section, department_id FROM aap_case_type_staff_tiers WHERE id = $row_id");
     $row = $row ? $row->fetch_assoc() : null;
     if (!$row) {
         echo json_encode(['success' => false, 'message' => 'Assignment not found.']);
+        exit;
+    }
+    if (!aapDeptInScope($row['department_id'], $aap_dept_ids, $aap_can_manage_all_depts)) {
+        echo json_encode(['success' => false, 'message' => 'You do not manage this department.']);
         exit;
     }
     // uq_case_type_section_staff (case_type_id, section, staff_id) - the new
@@ -172,6 +223,10 @@ if (isset($_POST['action']) && $_POST['action'] === 'change_assignment' && $_SER
     $stmt->bind_param("ii", $new_staff_id, $row_id);
     $stmt->execute();
     $stmt->close();
+    $ct_name = $conn->query("SELECT case_type_name FROM aap_case_types WHERE id = " . (int)$row['case_type_id'])->fetch_assoc()['case_type_name'] ?? 'Case Type #' . $row['case_type_id'];
+    $old_name = $conn->query("SELECT nama_staff FROM staff WHERE id = " . (int)$row['staff_id'])->fetch_assoc()['nama_staff'] ?? 'staff #' . $row['staff_id'];
+    $new_name = $conn->query("SELECT nama_staff FROM staff WHERE id = $new_staff_id")->fetch_assoc()['nama_staff'] ?? 'staff #' . $new_staff_id;
+    aapLogAdminAudit($conn, 'staff_assignments', 'assignment_reassigned', $id_user, (int)$row['staff_id'], "Reassigned {$row['section']} on \"$ct_name\" from $old_name to $new_name");
     echo json_encode(['success' => true, 'message' => 'Reassigned.']);
     exit;
 }
@@ -201,9 +256,21 @@ if (isset($_POST['action']) && $_POST['action'] === 'reassign_all_assignments' &
         exit;
     }
 
+    // A Department Manager only reassigns the portion of this staff
+    // member's assignments that fall in their own department(s) - rows in
+    // other departments are left untouched rather than erroring the whole
+    // batch, since "Reassign All" is meant to work even when the acting
+    // user only manages part of what this staff member holds.
+    $dept_scope_sql = '';
+    if (!$aap_can_manage_all_depts) {
+        $dept_scope_sql = empty($aap_dept_ids)
+            ? ' AND 1=0'
+            : ' AND department_id IN (' . implode(',', array_map('intval', $aap_dept_ids)) . ')';
+    }
+
     $moved = 0;
     $skipped = 0;
-    $rows_res = $conn->query("SELECT id, case_type_id, section FROM aap_case_type_staff_tiers WHERE staff_id = " . $old_staff_id);
+    $rows_res = $conn->query("SELECT id, case_type_id, section FROM aap_case_type_staff_tiers WHERE staff_id = " . $old_staff_id . $dept_scope_sql);
     $rows = $rows_res ? $rows_res->fetch_all(MYSQLI_ASSOC) : [];
     foreach ($rows as $row) {
         $dup = $conn->query("SELECT id FROM aap_case_type_staff_tiers WHERE case_type_id = " . (int)$row['case_type_id'] . " AND section = '" . $conn->real_escape_string($row['section']) . "' AND staff_id = $new_staff_id");
@@ -215,6 +282,9 @@ if (isset($_POST['action']) && $_POST['action'] === 'reassign_all_assignments' &
             $moved++;
         }
     }
+    $old_name = $conn->query("SELECT nama_staff FROM staff WHERE id = " . $old_staff_id)->fetch_assoc()['nama_staff'] ?? 'staff #' . $old_staff_id;
+    $new_name = $conn->query("SELECT nama_staff FROM staff WHERE id = $new_staff_id")->fetch_assoc()['nama_staff'] ?? 'staff #' . $new_staff_id;
+    aapLogAdminAudit($conn, 'staff_assignments', 'reassigned_all', $id_user, $old_staff_id, "Reassigned all of $old_name's assignments to $new_name ($moved moved, $skipped already covered)");
     echo json_encode(['success' => true, 'moved' => $moved, 'skipped' => $skipped]);
     exit;
 }
@@ -229,10 +299,30 @@ if (isset($_POST['action']) && $_POST['action'] === 'remove_all_assignments' && 
         echo json_encode(['success' => false, 'message' => 'Invalid staff.']);
         exit;
     }
-    $conn->query("DELETE FROM aap_case_type_staff_tiers WHERE staff_id = " . $staff_id);
+    // Same partial-scope reasoning as reassign_all_assignments above - a
+    // Department Manager only removes the portion within their own
+    // department(s), leaving the rest of this staff member's assignments
+    // alone.
+    $dept_scope_sql = '';
+    if (!$aap_can_manage_all_depts) {
+        $dept_scope_sql = empty($aap_dept_ids)
+            ? ' AND 1=0'
+            : ' AND department_id IN (' . implode(',', array_map('intval', $aap_dept_ids)) . ')';
+    }
+    $conn->query("DELETE FROM aap_case_type_staff_tiers WHERE staff_id = " . $staff_id . $dept_scope_sql);
+    $removed_count = $conn->affected_rows;
+    $staff_name = $conn->query("SELECT nama_staff FROM staff WHERE id = " . $staff_id)->fetch_assoc()['nama_staff'] ?? 'staff #' . $staff_id;
+    aapLogAdminAudit($conn, 'staff_assignments', 'removed_all', $id_user, $staff_id, "Removed all $removed_count assignment(s) for $staff_name");
     echo json_encode(['success' => true, 'message' => 'All assignments removed.']);
     exit;
 }
+
+// Audit Trail section (below) is only shown to an admin granted via
+// staff.aap specifically - not to someone who only reaches this page via
+// grade>=4/Digital Innovation/an OKR-or-ATEM SuperAdmin flag.
+$aap_show_audit_trail = ($aap_level === 1);
+$aap_admin_audit_logs = $aap_show_audit_trail ? aapFetchAdminAuditLogs($conn, 'staff_assignments') : [];
+
 $aap_base = '../';
 ?>
 
@@ -283,6 +373,30 @@ $aap_base = '../';
         </table>
     </div>
 </div>
+
+<?php if ($aap_show_audit_trail): ?>
+<div class="aap-card alpro-mt-20">
+    <h3 class="aap-card-title">Audit Trail</h3>
+    <p class="alpro-muted" style="font-size:12px; margin-top:-6px;">Every Remove/Reassign action made on this page, most recent first.</p>
+    <table class="alpro-table aap-ct-list-table" width="100%">
+        <thead><tr><th>When</th><th>Actor</th><th>Affected Staff</th><th>Action</th></tr></thead>
+        <tbody>
+            <?php if (empty($aap_admin_audit_logs)): ?>
+                <tr><td colspan="4" align="center" style="padding:15px;">No actions logged yet.</td></tr>
+            <?php else: ?>
+                <?php foreach ($aap_admin_audit_logs as $log): ?>
+                    <tr>
+                        <td class="alpro-mono"><?php echo date('d-m-Y H:i', strtotime($log['timestamp'])); ?></td>
+                        <td><?php echo htmlspecialchars($log['actor_name'] ?: 'Unknown'); ?></td>
+                        <td><?php echo htmlspecialchars($log['target_name'] ?: '—'); ?></td>
+                        <td><?php echo htmlspecialchars($log['summary']); ?></td>
+                    </tr>
+                <?php endforeach; ?>
+            <?php endif; ?>
+        </tbody>
+    </table>
+</div>
+<?php endif; ?>
 </div>
 
 <?php $page_js = '../js/aap_staff_assignments.js'; include('../aap_footer.php'); ?>

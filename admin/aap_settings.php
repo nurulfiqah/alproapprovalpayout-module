@@ -13,16 +13,28 @@ if (!isset($conn) || !($conn instanceof mysqli)) {
 }
 require_once('../aap_lib.php');
 
-// This page grants/revokes staff.aap (AAP SuperAdmin) itself, so it's
-// SuperAdmin-only (staff.aap = 2), not general aapIsAdmin() - a grade>=4/
-// Digital Innovation/staff.aap=1 admin ("Admin 1") can manage Case Types
-// but must not be able to hand themselves or anyone else SuperAdmin. Only
-// an existing SuperAdmin ("Admin 2") can open this page.
-$aap_dept_ids = aapDeptIdsFromCsv($department);
-$aap_is_superadmin = aapFetchIsSuperAdmin($conn, $id_user);
-$aap_is_admin = aapIsAdmin($grade, $aap_dept_ids, $aap_is_superadmin, aapFetchAapLevel($conn, $id_user));
+// This page grants/revokes staff.aap (AAP admin access) itself, so only an
+// existing AAP admin can open it - a grade>=4/Digital Innovation admin who
+// doesn't hold staff.aap can still manage Case Types elsewhere in the module
+// (general aapIsAdmin()), but can't hand out AAP admin access from here.
+$aap_identity = aapResolveIdentity($conn, $id_user, $grade, $department);
+$grade = $aap_identity['grade'];
+$department = $aap_identity['department'];
+$aap_dept_ids = $aap_identity['dept_ids'];
+$aap_is_admin = $aap_identity['is_admin'];
+$aap_is_superadmin = $aap_identity['is_superadmin'];
 if (!$aap_is_superadmin) {
-    die("SuperAdmin access only. This page manages AAP SuperAdmin Access.");
+    die("Admin access only. This page manages AAP Admin Access.");
+}
+
+// PHP's default session handler locks the session file for the whole
+// request - this page is hit repeatedly via AJAX below (staff search, Bank
+// Master CRUD) and never writes to $_SESSION itself, so releasing the lock
+// here lets those requests (and everything else sharing this browser's
+// session) run concurrently instead of queuing up behind whichever one
+// happens to be mid-request.
+if (session_status() === PHP_SESSION_ACTIVE) {
+    session_write_close();
 }
 
 $msg = "";
@@ -83,13 +95,14 @@ if (isset($_POST['action']) && $_POST['action'] === 'update_aap_superadmin' && $
     ob_end_clean();
     header('Content-Type: application/json');
     $target_id = (int)($_POST['staff_id'] ?? 0);
-    // staff.aap is a level, not a flag: 0 = no access, 1 = "Admin 1"
-    // (general admin), 2 = "Admin 2" (full SuperAdmin) - see
-    // aapFetchAapLevel()/aapFetchIsSuperAdmin() in aap_lib.php. Anything
-    // else posted collapses to 0 rather than left as whatever garbage came
-    // in.
+    // staff.aap is just a flag now: 0 = no access, 1 = full AAP admin access
+    // (see aapFetchAapLevel()/aapFetchIsSuperAdmin() in aap_lib.php - the old
+    // two-tier "Admin 1"/"Admin 2 (SuperAdmin)" split was removed since
+    // there was never a real reason to hold anything back from Admin 1).
+    // Anything else posted collapses to 0 rather than left as whatever
+    // garbage came in.
     $aap_val = (int)($_POST['aap'] ?? 0);
-    if (!in_array($aap_val, [0, 1, 2], true)) $aap_val = 0;
+    if (!in_array($aap_val, [0, 1], true)) $aap_val = 0;
 
     if ($target_id <= 0) {
         echo json_encode(['success' => false, 'message' => 'Invalid staff.']);
@@ -105,6 +118,96 @@ if (isset($_POST['action']) && $_POST['action'] === 'update_aap_superadmin' && $
     } else {
         echo json_encode(['success' => false, 'message' => 'Database error: ' . $conn->error]);
     }
+    exit;
+}
+
+// ---- Bank Master panel - AJAX endpoints. Lets a SuperAdmin add/rename/
+// retire banks straight from the frontend instead of needing a DB script
+// each time (see aap_bank_master table, aapFetchBankMasterOptions() in
+// aap_lib.php - the Bank Detail dropdown on aap_add.php/aap_update.php reads
+// from that same table). Soft-delete via `recycle`, same convention as
+// aap_case_types, so a retired bank stays intact on historical cases that
+// already reference its id.
+if (isset($_GET['action']) && $_GET['action'] === 'list_banks' && $_SERVER['REQUEST_METHOD'] === 'GET') {
+    ob_end_clean();
+    header('Content-Type: application/json');
+    $rows = [];
+    $res = $conn->query("SELECT id, bank_name, sort_order, recycle FROM aap_bank_master ORDER BY sort_order, bank_name");
+    while ($res && $row = $res->fetch_assoc()) {
+        $rows[] = [
+            'id' => (int)$row['id'],
+            'bank_name' => $row['bank_name'],
+            'sort_order' => (int)$row['sort_order'],
+            'recycle' => (int)$row['recycle'],
+        ];
+    }
+    echo json_encode(['success' => true, 'data' => $rows]);
+    exit;
+}
+
+if (isset($_POST['action']) && $_POST['action'] === 'add_bank' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    ob_end_clean();
+    header('Content-Type: application/json');
+    $bank_name = trim($_POST['bank_name'] ?? '');
+    if ($bank_name === '') {
+        echo json_encode(['success' => false, 'message' => 'Bank name is required.']);
+        exit;
+    }
+    $dup = $conn->query("SELECT id FROM aap_bank_master WHERE bank_name = '" . $conn->real_escape_string($bank_name) . "' AND recycle = 0");
+    if ($dup && $dup->num_rows > 0) {
+        echo json_encode(['success' => false, 'message' => 'That bank already exists.']);
+        exit;
+    }
+    $max_res = $conn->query("SELECT COALESCE(MAX(sort_order), 0) m FROM aap_bank_master");
+    $next_sort = ((int)$max_res->fetch_assoc()['m']) + 1;
+    $stmt = $conn->prepare("INSERT INTO aap_bank_master (bank_name, sort_order, timestamp) VALUES (?, ?, ?)");
+    $stmt->bind_param("sis", $bank_name, $next_sort, $now);
+    if ($stmt->execute()) {
+        echo json_encode(['success' => true, 'message' => 'Bank added.']);
+    } else {
+        echo json_encode(['success' => false, 'message' => 'Database error: ' . $conn->error]);
+    }
+    $stmt->close();
+    exit;
+}
+
+if (isset($_POST['action']) && $_POST['action'] === 'rename_bank' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    ob_end_clean();
+    header('Content-Type: application/json');
+    $bank_id = (int)($_POST['bank_id'] ?? 0);
+    $bank_name = trim($_POST['bank_name'] ?? '');
+    if ($bank_id <= 0 || $bank_name === '') {
+        echo json_encode(['success' => false, 'message' => 'Invalid bank or name.']);
+        exit;
+    }
+    $stmt = $conn->prepare("UPDATE aap_bank_master SET bank_name = ? WHERE id = ?");
+    $stmt->bind_param("si", $bank_name, $bank_id);
+    if ($stmt->execute()) {
+        echo json_encode(['success' => true, 'message' => 'Bank updated.']);
+    } else {
+        echo json_encode(['success' => false, 'message' => 'Database error: ' . $conn->error]);
+    }
+    $stmt->close();
+    exit;
+}
+
+if (isset($_POST['action']) && $_POST['action'] === 'toggle_bank_recycle' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    ob_end_clean();
+    header('Content-Type: application/json');
+    $bank_id = (int)($_POST['bank_id'] ?? 0);
+    $recycle = (int)($_POST['recycle'] ?? 0) === 1 ? 1 : 0;
+    if ($bank_id <= 0) {
+        echo json_encode(['success' => false, 'message' => 'Invalid bank.']);
+        exit;
+    }
+    $stmt = $conn->prepare("UPDATE aap_bank_master SET recycle = ? WHERE id = ?");
+    $stmt->bind_param("ii", $recycle, $bank_id);
+    if ($stmt->execute()) {
+        echo json_encode(['success' => true, 'message' => $recycle ? 'Bank retired.' : 'Bank restored.']);
+    } else {
+        echo json_encode(['success' => false, 'message' => 'Database error: ' . $conn->error]);
+    }
+    $stmt->close();
     exit;
 }
 $aap_base = '../';
@@ -124,9 +227,9 @@ $aap_base = '../';
     <div class="alpro-alert <?php echo $msg_type; ?> alpro-mt-20"><?php echo htmlspecialchars($msg); ?></div>
 <?php endif; ?>
 
-<!-- ===================== MANAGE AAP SUPERADMIN ACCESS ===================== -->
+<!-- =====================  ===================== -->
 <div class="alpro-box alpro-mt-20" style="text-align:left;">
-    <h3 style="margin-top:0; text-align:left;">Manage AAP SuperAdmin Access</h3>
+    <h3 style="margin-top:0; text-align:left;">Manage AAP Admin Access</h3>
 
     <div class="aap-modern">
     <form onsubmit="return false;" class="sa-filter-form" style="display:flex; gap:8px; align-items:flex-end; margin-bottom:14px;">
@@ -151,15 +254,14 @@ $aap_base = '../';
 
     <div id="sa-edit" class="aap-modern" style="display:none;">
     <div class="aap-card alpro-mt-20" style="max-width:420px;">
-        <h6 class="aap-card-title" style="margin-bottom:14px;">Update SuperAdmin Access</h6>
+        <h6 class="aap-card-title" style="margin-bottom:14px;">Update Admin Access</h6>
         <p style="margin:0 0 4px;"><strong>Name:</strong> <span id="sa-info-name"></span></p>
         <p style="margin:0 0 14px;"><strong>Department:</strong> <span id="sa-info-dept"></span></p>
         <div class="alpro-field" style="margin-bottom:14px;">
-            <label style="font-size:10px; font-weight:600; color:#6c757d; text-transform:uppercase;">AAP Access Level</label>
+            <label style="font-size:10px; font-weight:600; color:#6c757d; text-transform:uppercase;">AAP Access</label>
             <select class="alpro-input" id="sa-aap-level">
                 <option value="0">No Access</option>
-                <option value="1">Admin 1 (general admin)</option>
-                <option value="2">Admin 2 (SuperAdmin - full access)</option>
+                <option value="1">Admin (full access)</option>
             </select>
         </div>
         <div id="sa-alert" class="alpro-alert" style="display:none; margin-bottom:10px;"></div>
@@ -167,6 +269,32 @@ $aap_base = '../';
             <button type="button" class="alpro-btn alpro-btn-grey" id="sa-cancel-btn">Cancel</button>
             <button type="button" class="alpro-btn alpro-btn-blue" id="sa-update-btn">Update</button>
         </div>
+    </div>
+    </div>
+</div>
+
+<!-- =====================  ===================== -->
+<div class="alpro-box alpro-mt-20" style="text-align:left;">
+    <h3 style="margin-top:0; text-align:left;">Bank Master</h3>
+    <p class="alpro-muted" style="margin-top:-8px;">Banks listed here populate the Bank Name dropdown on Raise Case / Edit Case. Retiring a bank removes it from that dropdown but keeps it on any case that already used it.</p>
+
+    <div class="aap-modern">
+    <div class="aap-card">
+        <form onsubmit="return false;" style="display:flex; gap:8px; align-items:flex-end; margin-bottom:14px;">
+            <div class="alpro-field" style="flex:1; max-width:320px;">
+                <label style="font-size:10px; font-weight:600; color:#6c757d; text-transform:uppercase;">New Bank Name</label>
+                <input class="alpro-input" type="text" id="bank-new-name" placeholder="e.g. Bank Islam Malaysia Berhad">
+            </div>
+            <input class="alpro-btn alpro-btn-blue" type="button" id="bank-add-btn" value="Add Bank">
+        </form>
+        <div id="bank-alert" class="alpro-alert" style="display:none; margin-bottom:10px;"></div>
+
+        <table class="alpro-table" width="100%">
+            <tr><th>Bank Name</th><th style="width:120px;">Status</th><th style="width:160px;"></th></tr>
+            <tbody id="bank-tbody">
+                <tr><td colspan="3" align="center" style="padding:15px;">Loading...</td></tr>
+            </tbody>
+        </table>
     </div>
     </div>
 </div>

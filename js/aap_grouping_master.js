@@ -1,4 +1,26 @@
 document.addEventListener('DOMContentLoaded', function () {
+    // Page-wide guard against firing a second mutating request while one is
+    // still in flight - every Assign/Save/Delete/Customize/Add Group/Revert/
+    // Unlimited-toggle action on this page does at least one fetch, and none
+    // of them disabled themselves while pending. A few impatient clicks used
+    // to be able to stack up several concurrent requests to this same
+    // AJAX-heavy page (nested department/group/tier/staff queries per
+    // request) - if the server only works through them one at a time, that
+    // pile-up reads as the whole page freezing until they all drain or the
+    // page is refreshed. `guarded()` wraps a click handler so a click while
+    // busy is simply ignored instead of adding to the pile.
+    var aapBusy = false;
+    function guarded(fn) {
+        return function () {
+            if (aapBusy) return;
+            var result = fn.apply(this, arguments);
+            if (result && typeof result.finally === 'function') {
+                aapBusy = true;
+                result.finally(function () { aapBusy = false; });
+            }
+        };
+    }
+
     function esc(s) {
         var d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML;
     }
@@ -58,27 +80,28 @@ document.addEventListener('DOMContentLoaded', function () {
             // unticking it opens the row in the editor instead of guessing a
             // value to save with.
             tbody.querySelectorAll('.universal-tier-unlimited-toggle').forEach(function (cb) {
-                cb.addEventListener('change', function () {
+                cb.addEventListener('change', guarded(function () {
                     var tr = cb.closest('tr');
                     var id = tr.getAttribute('data-id');
                     var name = tr.getAttribute('data-name');
                     if (cb.checked) {
-                        confirmTierImpact(null, name, 'edit').then(function (ok) {
+                        return confirmTierImpact(null, name, 'edit').then(function (ok) {
                             if (!ok) { cb.checked = false; return; }
                             var body = new URLSearchParams();
                             body.set('action', 'update_tier');
                             body.set('id', id);
                             body.set('tier_name', name);
                             body.set('unlimited', '1');
-                            fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function (res) {
+                            return fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function (res) {
                                 if (res.success) tr.setAttribute('data-value', '');
+                                else if (res.message) alert(res.message);
                                 render();
                             });
                         });
                     } else {
                         startEdit(tr);
                     }
-                });
+                }));
             });
         }
 
@@ -92,9 +115,9 @@ document.addEventListener('DOMContentLoaded', function () {
                 + '<button type="button" class="alpro-btn alpro-btn-grey universal-tier-cancel" style="padding:2px 8px; font-size:11px;">Cancel</button>';
             valueCell.querySelector('.universal-tier-value-input').focus();
 
-            actionCell.querySelector('.universal-tier-save').addEventListener('click', function () {
+            actionCell.querySelector('.universal-tier-save').addEventListener('click', guarded(function () {
                 var value = valueCell.querySelector('.universal-tier-value-input').value.trim();
-                confirmTierImpact(null, name, 'edit').then(function (ok) {
+                return confirmTierImpact(null, name, 'edit').then(function (ok) {
                     if (!ok) { render(); return; }
                     var body = new URLSearchParams();
                     body.set('action', 'update_tier');
@@ -102,12 +125,13 @@ document.addEventListener('DOMContentLoaded', function () {
                     body.set('tier_name', name);
                     body.set('unlimited', value === '' ? '1' : '0');
                     if (value !== '') body.set('tier_value', value);
-                    fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function (res) {
+                    return fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function (res) {
                         if (res.success) tr.setAttribute('data-value', value);
+                        else if (res.message) alert(res.message);
                         render();
                     });
                 });
-            });
+            }));
             actionCell.querySelector('.universal-tier-cancel').addEventListener('click', render);
         }
 
@@ -130,8 +154,23 @@ document.addEventListener('DOMContentLoaded', function () {
         var editSection = block.querySelector('.dept-edit');
         var groupsContainer = block.querySelector('.dept-groups-container');
         var addGroupBtn = block.querySelector('.dept-add-group-btn');
+        var defaultTbody = block.querySelector('.dept-default-tbody');
         var loaded = false;
         var staffPoolPromise = null;
+
+        // Read-only reference table - this department's own staff mapped
+        // onto the Universal grade->tier ladder (aapFetchDepartmentDefaultTiers()
+        // in aap_grouping_master.php). Always rendered regardless of
+        // Universal/Custom status, never editable.
+        function renderDefaultTiers(tiers) {
+            if (!defaultTbody) return;
+            defaultTbody.innerHTML = (tiers || []).map(function (t) {
+                var staffHtml = (t.staff || []).map(function (name) {
+                    return '<span class="aap-tier-staff-pill">' + esc(name) + '</span>';
+                }).join('') || '<span class="alpro-muted">None</span>';
+                return '<tr><td>' + esc(t.tier_name) + '</td><td>' + esc(fmtValue(t.tier_value)) + '</td><td>' + staffHtml + '</td></tr>';
+            }).join('');
+        }
 
         // Staff pool is the same for every Group in this department (it's
         // just "who's in this department"), so it's fetched once and shared.
@@ -151,11 +190,11 @@ document.addEventListener('DOMContentLoaded', function () {
         }
 
         function renderGroup(g) {
-            return '<div class="aap-group-block" data-group-id="' + g.id + '" style="margin-bottom:16px; border:1px solid #dee2e6; border-radius:6px; overflow:hidden;">'
-                + '<div style="background:#0d6efd; display:flex; align-items:stretch;">'
-                + '<input type="text" class="group-name-input" value="' + esc(g.group_name) + '" placeholder="Group Name" style="flex:1; background:transparent; border:none; border-right:1px solid rgba(255,255,255,0.35); color:#fff; font-weight:700; padding:8px 12px; outline:none;">'
-                + '<input type="text" class="group-desc-input" value="' + esc(g.description || '') + '" placeholder="Group Description" style="flex:2; background:transparent; border:none; color:#fff; padding:8px 12px; outline:none;">'
-                + '<button type="button" class="group-delete-btn" title="Delete this Group" style="background:transparent; border:none; color:#fff; padding:0 14px; cursor:pointer; font-size:16px; font-weight:bold;">&times;</button>'
+            return '<div class="aap-group-block" data-group-id="' + g.id + '" style="margin-bottom:16px; border:1px solid #e9ecef; border-radius:10px; overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,0.08);">'
+                + '<div style="background:#eef2f7; border-bottom:1px solid #dbe3ea; display:flex; align-items:stretch;">'
+                + '<input type="text" class="group-name-input" value="' + esc(g.group_name) + '" readonly title="Group Name is fixed - identify this Group with the Description field instead" style="flex:1; background:transparent; border:none; border-right:1px solid #dbe3ea; color:#2c3e50; font-weight:700; padding:8px 12px; outline:none; cursor:default;">'
+                + '<input type="text" class="group-desc-input" value="' + esc(g.description || '') + '" placeholder="Group Description (e.g. Academy Moodle)" style="flex:2; background:transparent; border:none; color:#495057; padding:8px 12px; outline:none;">'
+                + '<button type="button" class="group-delete-btn" title="Delete this Group" style="background:transparent; border:none; color:#6c757d; padding:0 14px; cursor:pointer; font-size:16px; font-weight:bold;">&times;</button>'
                 + '</div>'
                 + '<div style="padding:12px;">'
                 + '<div style="display:flex; gap:8px; align-items:center; margin-bottom:8px; max-width:700px;">'
@@ -197,7 +236,6 @@ document.addEventListener('DOMContentLoaded', function () {
             var assignStaffSelect = groupEl.querySelector('.group-assign-staff');
             var assignTierSelect = groupEl.querySelector('.group-assign-tier');
             var assignBtn = groupEl.querySelector('.group-assign-btn');
-            var nameInput = groupEl.querySelector('.group-name-input');
             var descInput = groupEl.querySelector('.group-desc-input');
             var deleteBtn = groupEl.querySelector('.group-delete-btn');
 
@@ -217,9 +255,9 @@ document.addEventListener('DOMContentLoaded', function () {
                     + '<button type="button" class="alpro-btn alpro-btn-grey group-tier-cancel" style="padding:2px 8px; font-size:11px;">Cancel</button>';
                 valueCell.querySelector('.group-tier-value-input').focus();
 
-                actionCell.querySelector('.group-tier-save').addEventListener('click', function () {
+                actionCell.querySelector('.group-tier-save').addEventListener('click', guarded(function () {
                     var value = valueCell.querySelector('.group-tier-value-input').value.trim();
-                    confirmTierImpact(deptId, name, 'edit').then(function (ok) {
+                    return confirmTierImpact(deptId, name, 'edit').then(function (ok) {
                         if (!ok) { load(); return; }
                         var body = new URLSearchParams();
                         body.set('action', 'update_tier');
@@ -227,40 +265,46 @@ document.addEventListener('DOMContentLoaded', function () {
                         body.set('tier_name', name);
                         body.set('unlimited', value === '' ? '1' : '0');
                         if (value !== '') body.set('tier_value', value);
-                        fetch('', { method: 'POST', body: body }).then(function () { load(); });
+                        return fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function (res) {
+                            if (!res.success && res.message) alert(res.message);
+                            load();
+                        });
                     });
-                });
-                actionCell.querySelector('.group-tier-cancel').addEventListener('click', load);
+                }));
+                actionCell.querySelector('.group-tier-cancel').addEventListener('click', guarded(function () { return load(); }));
             }
 
             tbody.querySelectorAll('.group-tier-edit').forEach(function (btn) {
                 btn.addEventListener('click', function () { startEdit(btn.closest('tr')); });
             });
 
-            tbody.addEventListener('change', function (e) {
+            tbody.addEventListener('change', guarded(function (e) {
                 if (!e.target.classList.contains('group-tier-unlimited-toggle')) return;
                 var cb = e.target;
                 var tr = cb.closest('tr');
                 var id = tr.getAttribute('data-id');
                 var name = tr.getAttribute('data-name');
                 if (cb.checked) {
-                    confirmTierImpact(deptId, name, 'edit').then(function (ok) {
+                    return confirmTierImpact(deptId, name, 'edit').then(function (ok) {
                         if (!ok) { cb.checked = false; return; }
                         var body = new URLSearchParams();
                         body.set('action', 'update_tier');
                         body.set('id', id);
                         body.set('tier_name', name);
                         body.set('unlimited', '1');
-                        fetch('', { method: 'POST', body: body }).then(function () { load(); });
+                        return fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function (res) {
+                            if (!res.success) { cb.checked = false; if (res.message) alert(res.message); }
+                            load();
+                        });
                     });
                 } else {
                     startEdit(tr);
                 }
-            });
+            }));
 
             // Unassigning a manually-assigned staff member - revert to their
             // grade-default tier within this Group.
-            tbody.addEventListener('click', function (e) {
+            tbody.addEventListener('click', guarded(function (e) {
                 if (!e.target.classList.contains('group-staff-unassign')) return;
                 var el = e.target;
                 if (!confirm('Unassign this staff member? They will revert to their grade-default tier.')) return;
@@ -268,10 +312,10 @@ document.addEventListener('DOMContentLoaded', function () {
                 body.set('action', 'unassign_tier_staff');
                 body.set('tier_id', el.getAttribute('data-tier-id'));
                 body.set('staff_id', el.getAttribute('data-staff-id'));
-                fetch('', { method: 'POST', body: body }).then(function () { load(); });
-            });
+                return fetch('', { method: 'POST', body: body }).then(function () { load(); });
+            }));
 
-            assignBtn.addEventListener('click', function () {
+            assignBtn.addEventListener('click', guarded(function () {
                 var staffId = assignStaffSelect.value;
                 var tierId = assignTierSelect.value;
                 if (!staffId || !tierId) return;
@@ -279,35 +323,37 @@ document.addEventListener('DOMContentLoaded', function () {
                 body.set('action', 'assign_tier_staff');
                 body.set('tier_id', tierId);
                 body.set('staff_id', staffId);
-                fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function (res) {
+                return fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function (res) {
                     if (!res.success) { alert(res.message || 'Could not assign.'); return; }
                     load();
                 });
-            });
+            }));
 
-            // Group Name/Description save on blur, only if actually changed.
+            // Group Name is fixed ("Group 1", "Group 2", ... - assigned once
+            // at creation, never renamed) so every dropdown that lists
+            // Groups elsewhere (e.g. admin/aap_admin.php's Level 2/3 Staff
+            // Tier picker) can rely on it as a stable identifier - only
+            // Description is editable, and is what actually identifies what
+            // the Group is for (shown alongside the name there, e.g.
+            // "Group 1: Academy Moodle").
             function saveGroupMeta() {
-                var name = nameInput.value.trim();
-                if (!name) { name = 'Group'; nameInput.value = name; }
                 var body = new URLSearchParams();
                 body.set('action', 'update_group');
                 body.set('group_id', g.id);
-                body.set('group_name', name);
                 body.set('description', descInput.value.trim());
                 fetch('', { method: 'POST', body: body });
             }
-            nameInput.addEventListener('blur', saveGroupMeta);
             descInput.addEventListener('blur', saveGroupMeta);
-            nameInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') nameInput.blur(); });
             descInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') descInput.blur(); });
 
-            deleteBtn.addEventListener('click', function () {
-                if (!confirm('Delete this Group? Its tier values and staff assignments will be removed.')) return;
+            deleteBtn.addEventListener('click', guarded(function () {
+                var label = descInput.value.trim() ? (g.group_name + ': ' + descInput.value.trim()) : g.group_name;
+                if (!confirm('Delete "' + label + '"?\n\nThis permanently removes its tier values and every staff assignment in it - anyone currently approving under this Group will lose that ability immediately. This cannot be undone.')) return;
                 var body = new URLSearchParams();
                 body.set('action', 'delete_group');
                 body.set('group_id', g.id);
-                fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function () { load(); });
-            });
+                return fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function () { load(); });
+            }));
         }
 
         function load() {
@@ -316,10 +362,11 @@ document.addEventListener('DOMContentLoaded', function () {
             revertBtn.style.display = 'none';
             editSection.style.display = 'none';
 
-            fetch('?action=get_department_groups&department_id=' + encodeURIComponent(deptId))
+            return fetch('?action=get_department_groups&department_id=' + encodeURIComponent(deptId))
                 .then(function (r) { return r.json(); })
                 .then(function (res) {
                     if (!res.success) { statusEl.textContent = res.message || 'Failed to load.'; return; }
+                    renderDefaultTiers(res.default_tiers);
                     if (res.is_custom) {
                         statusEl.innerHTML = '<span class="alpro-badge alpro-badge-approved">Custom</span> This department has its own Group(s).';
                         revertBtn.style.display = 'inline-block';
@@ -332,31 +379,31 @@ document.addEventListener('DOMContentLoaded', function () {
                 });
         }
 
-        customizeBtn.addEventListener('click', function () {
+        customizeBtn.addEventListener('click', guarded(function () {
             var body = new URLSearchParams();
             body.set('action', 'add_group');
             body.set('department_id', deptId);
-            fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function () { load(); });
-        });
+            return fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function () { return load(); });
+        }));
 
-        addGroupBtn.addEventListener('click', function () {
+        addGroupBtn.addEventListener('click', guarded(function () {
             var body = new URLSearchParams();
             body.set('action', 'add_group');
             body.set('department_id', deptId);
-            fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function () { load(); });
-        });
+            return fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function () { return load(); });
+        }));
 
-        revertBtn.addEventListener('click', function () {
+        revertBtn.addEventListener('click', guarded(function () {
             if (!confirm('Revert this department back to the Universal tiers? All of its Groups will be deleted.')) return;
             var body = new URLSearchParams();
             body.set('action', 'revert_department');
             body.set('department_id', deptId);
-            fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function () { load(); });
-        });
+            return fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function () { return load(); });
+        }));
 
-        block.addEventListener('toggle', function () {
-            if (block.open && !loaded) { loaded = true; load(); }
-        });
+        block.addEventListener('toggle', guarded(function () {
+            if (block.open && !loaded) { loaded = true; return load(); }
+        }));
     });
 
     // ---- Search + pagination for the department list above - purely

@@ -12,6 +12,17 @@ require_once('../lock_adv.php');
 $connect = 1;
 include('../common/index_adv.php');
 ob_end_clean();
+
+// PHP's default session handler locks the session file for the whole
+// request - this endpoint fires on nearly every keystroke of the Customer/
+// Membership ID typeahead and never writes to $_SESSION, so releasing the
+// lock here stops a slow customer-table LIKE search from blocking every
+// other request sharing this browser's session (the notification poll,
+// other tabs, the next click) until it finishes.
+if (session_status() === PHP_SESSION_ACTIVE) {
+    session_write_close();
+}
+
 header('Content-Type: application/json');
 
 if (!isset($conn) || !($conn instanceof mysqli)) {

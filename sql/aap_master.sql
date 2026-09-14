@@ -52,6 +52,14 @@
 --    default value for 'ap_status'", run `SET SESSION sql_mode = '';`
 --    first (session-scoped, doesn't change ap_status itself, just permits
 --    the ALTER through).
+--
+-- SUPERSEDED (2026-09-14): point 1/2 above no longer apply - the two-tier
+-- "Admin 1"/"Admin 2 (SuperAdmin)" split was removed. `staff.aap` is back to
+-- being a plain flag (0 = no access, 1 = full AAP admin access - every admin
+-- page/feature, nothing held back). aapFetchIsSuperAdmin() now treats any
+-- staff.aap >= 1 as part of the admin union, same weight as an okr/atem
+-- SuperAdmin flag - see aap_lib.php. No schema change needed for this
+-- either; existing aap=1 rows just mean more than they used to.
 -- ============================================================
 
 -- --------------------------------------------------------
@@ -92,8 +100,25 @@ CREATE TABLE `aap_case_types` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- --------------------------------------------------------
+-- aap_bank_master
+-- Lookup list of banks for the Bank Detail section's dropdown
+-- (aap_add.php/aap_update.php) - aap_cases.bank_id references this table's
+-- id instead of storing a free-text bank name. Soft-deletable via `recycle`
+-- like the other lookup tables, so a retired bank stays intact on historical
+-- cases that already reference it.
+-- --------------------------------------------------------
+
+CREATE TABLE `aap_bank_master` (
+  `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  `bank_name` VARCHAR(150) NOT NULL,
+  `sort_order` INT NOT NULL DEFAULT 0,
+  `recycle` TINYINT(1) NOT NULL DEFAULT 0,
+  `timestamp` DATETIME NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- --------------------------------------------------------
 -- aap_case_type_staff_tiers
--- Per-Case-Type Approval Gate (section='approval') and Exclusion
+-- Per-Case-Type approval gate (section='approval') and Exclusion
 -- (section='exclusion') staff rosters - replaces the old department-pool
 -- approver_mode system entirely (see aap_case_types' redesign note above).
 -- Each row is one staff member's tier for one Case Type/section. `tier` is
@@ -142,7 +167,7 @@ CREATE TABLE `aap_case_type_staff_tiers` (
 -- --------------------------------------------------------
 -- aap_cases
 -- The core case record — one row per raised case, carrying it through
--- the full lifecycle (Draft -> Open -> Physical Confirm -> Approval ->
+-- the full lifecycle (Draft -> Open -> Verification Required -> Approval ->
 -- Execution -> Closed/Rejected/Voided).
 -- --------------------------------------------------------
 
@@ -160,6 +185,18 @@ CREATE TABLE `aap_cases` (
   `requester_staff_id` INT NOT NULL,
   `requester_department_id` INT NULL DEFAULT NULL,
   `customer_membership_id` VARCHAR(100) NULL,
+  -- Captured alongside customer_membership_id at raise time (aap_add.php's
+  -- Customer/Membership ID typeahead, see aap_search_customer.php) - kept as
+  -- its own column rather than folded back into one combined field, so the
+  -- membership ID field itself only ever holds the clean ID.
+  `customer_name` VARCHAR(255) NULL,
+  -- Bank Detail section (aap_add.php/aap_update.php, between Case
+  -- Summary/Details and Evidence Attachments) - collected for payout
+  -- processing, editable same as the rest of the case's own fields.
+  -- bank_name references aap_bank_master.id (dropdown, not free text).
+  `bank_id` INT UNSIGNED NULL,
+  `bank_account_number` VARCHAR(50) NULL,
+  `bank_account_holder` VARCHAR(255) NULL,
   `transaction_ref` VARCHAR(100) NULL,
   `evidence_note` TEXT NULL,
   `calculated_value` DECIMAL(12,2) NULL DEFAULT NULL,
@@ -200,6 +237,20 @@ CREATE TABLE `aap_cases` (
   `timestamp` DATETIME NOT NULL,
   `updated_at` DATETIME NOT NULL,
   `closed_at` DATETIME NULL DEFAULT NULL,
+  -- Suspend (aap_update.php's 'suspend_case' action, Execution-only) sends a
+  -- case back to Verification/Approval - never to 'draft', case_status stays
+  -- 'open' throughout. `suspended_at` is the most recent suspend's
+  -- timestamp, used as a hard floor by aapCaseCurrentPhaseStartedAt()
+  -- (aap_lib.php) so evidence/notes/attachments from before it stay frozen
+  -- forever, even for their own author, even once that phase would normally
+  -- be editable again. `suspend_count` just flags a case that was EVER
+  -- suspended, so the final Closed status can read "Closed (Suspended)"
+  -- (aapCaseDisplayStatus()) - it doesn't otherwise change closed-case
+  -- behavior.
+  `suspended_at` DATETIME NULL DEFAULT NULL,
+  `suspended_by` INT NULL DEFAULT NULL,
+  `suspend_reason` VARCHAR(255) NULL,
+  `suspend_count` INT UNSIGNED NOT NULL DEFAULT 0,
   UNIQUE KEY `uq_aap_cases_ref` (`case_ref`),
   KEY `idx_aap_cases_type` (`case_type_id`),
   KEY `idx_aap_cases_status` (`case_status`),
@@ -223,6 +274,51 @@ CREATE TABLE `aap_case_attachments` (
   `uploaded_by` INT NOT NULL,
   `timestamp` DATETIME NOT NULL,
   KEY `idx_aap_attach_case` (`case_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- --------------------------------------------------------
+-- aap_case_execution_attachments
+-- Execution-only evidence files (aap_update.php's Execution card) - kept as
+-- its own table rather than a visibility flag on aap_case_attachments, so a
+-- query that forgets to filter by visibility can never accidentally leak
+-- these to the requester/approver/anyone else. Only queried, rendered,
+-- uploaded to, and downloaded from when the viewer can execute the case
+-- (aapCanExecute() - Operations dept or admin), checked independently at
+-- every touchpoint in aap_update.php.
+-- --------------------------------------------------------
+
+CREATE TABLE `aap_case_execution_attachments` (
+  `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  `case_id` INT UNSIGNED NOT NULL,
+  `file_name` VARCHAR(255) NOT NULL,
+  `stored_name` VARCHAR(255) NOT NULL,
+  `uploaded_by` INT NOT NULL,
+  `timestamp` DATETIME NOT NULL,
+  KEY `idx_aap_exec_attach_case` (`case_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- --------------------------------------------------------
+-- aap_admin_audit_logs
+-- General-purpose audit log for admin pages whose actions aren't scoped to
+-- one case (aap_audit_logs.case_id is NOT NULL, so it can't be reused here) -
+-- e.g. admin/aap_staff_assignments.php's Remove/Reassign/Reassign All/
+-- Remove All actions, which act on a staff member's rows across many
+-- departments/Case Types at once. `page` identifies which admin page wrote
+-- the row (currently only 'staff_assignments'), so more pages can share this
+-- table later. Its Audit Trail section on aap_staff_assignments.php is only
+-- ever shown to a general Admin ("Admin 1", staff.aap = 1), not SuperAdmin.
+-- --------------------------------------------------------
+
+CREATE TABLE `aap_admin_audit_logs` (
+  `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  `page` VARCHAR(50) NOT NULL,
+  `event` VARCHAR(50) NOT NULL,
+  `actor_staff_id` INT NOT NULL,
+  `target_staff_id` INT UNSIGNED NULL,
+  `summary` VARCHAR(255) NOT NULL,
+  `timestamp` DATETIME NOT NULL,
+  KEY `idx_aap_admin_audit_page` (`page`),
+  KEY `idx_aap_admin_audit_target` (`target_staff_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- --------------------------------------------------------
@@ -467,3 +563,27 @@ JOIN (
     SELECT 'Tier 0', 0
 ) g ON g.tier_name = t.tier_name
 WHERE t.department_id IS NULL;
+
+-- --------------------------------------------------------
+-- aap_department_managers
+-- A per-department allowlist of staff who can manage that department's
+-- Case Types (admin/aap_admin.php), Approval Unit Groups (admin/
+-- aap_grouping_master.php - their own department's Groups only, never the
+-- shared Universal list), and Staff Assignments lookups (admin/
+-- aap_staff_assignments.php) - granted on top of the normal
+-- staff.department/grade-based scoping (aapDeptInScope() in aap_lib.php),
+-- never in place of it. Deliberately ungated by grade or staff.department -
+-- being on this list is enough by itself, same as how fixit_department's
+-- Person Incharge names a department's contact without checking their
+-- grade. Managed from admin/aap_department_managers.php (admin-only).
+-- --------------------------------------------------------
+
+CREATE TABLE `aap_department_managers` (
+  `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  `department_id` INT UNSIGNED NOT NULL,
+  `staff_id` INT UNSIGNED NOT NULL,
+  `created_by` INT NULL DEFAULT NULL,
+  `timestamp` DATETIME NOT NULL,
+  UNIQUE KEY `uq_dept_manager` (`department_id`, `staff_id`),
+  KEY `idx_dept_manager_dept` (`department_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

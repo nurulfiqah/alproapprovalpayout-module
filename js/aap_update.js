@@ -22,6 +22,22 @@ document.addEventListener('DOMContentLoaded', function () {
 });
 
 document.addEventListener('DOMContentLoaded', function () {
+    // Membership ID, Transaction No, and Bank Account Number only ever hold
+    // digits - strip anything else as they're typed, same restriction as
+    // aap_add.php's fields.
+    function digitsOnlyFilter(el) {
+        if (!el) return;
+        el.addEventListener('input', function () {
+            var digitsOnly = el.value.replace(/\D/g, '');
+            if (digitsOnly !== el.value) el.value = digitsOnly;
+        });
+    }
+    digitsOnlyFilter(document.getElementById('edit-customer-membership-input'));
+    digitsOnlyFilter(document.getElementById('edit-transaction-ref-input'));
+    digitsOnlyFilter(document.getElementById('edit-bank-account-number-input'));
+});
+
+document.addEventListener('DOMContentLoaded', function () {
     var toggle = document.getElementById('void-case-toggle');
     var form = document.getElementById('void-case-form');
     var cancel = document.getElementById('void-case-cancel');
@@ -35,6 +51,22 @@ document.addEventListener('DOMContentLoaded', function () {
         cancel.addEventListener('click', function () {
             form.style.display = 'none';
             toggle.style.display = 'inline-flex';
+        });
+    }
+
+    var suspendToggle = document.getElementById('suspend-case-toggle');
+    var suspendForm = document.getElementById('suspend-case-form');
+    var suspendCancel = document.getElementById('suspend-case-cancel');
+    if (suspendToggle) {
+        suspendToggle.addEventListener('click', function () {
+            suspendToggle.style.display = 'none';
+            suspendForm.style.display = 'block';
+        });
+    }
+    if (suspendCancel) {
+        suspendCancel.addEventListener('click', function () {
+            suspendForm.style.display = 'none';
+            suspendToggle.style.display = 'inline-flex';
         });
     }
 });
@@ -69,6 +101,10 @@ document.addEventListener('DOMContentLoaded', function () {
     var viewEl = document.getElementById('case-view');
     var editEl = document.getElementById('case-edit');
     var actionsEl = document.getElementById('case-edit-actions');
+    // Bank Detail toggles together with Case Summary - one unified Edit/Save
+    // session rather than its own separate Edit button (see aap_update.php).
+    var bankViewEl = document.getElementById('bank-view');
+    var bankEditEl = document.getElementById('bank-edit');
 
     // Only present when $can_edit_case (aap_update.php) rendered this
     // section - other viewers get none of these elements.
@@ -91,40 +127,38 @@ document.addEventListener('DOMContentLoaded', function () {
         if (fileInput) editEl.appendChild(fileInput);
     });
 
-    var deleteForms = document.querySelectorAll('.attachment-delete-form');
-    var noteActions = document.querySelectorAll('.note-actions');
-
-    document.querySelectorAll('.note-edit-toggle').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-            var noteId = btn.dataset.noteId;
-            document.getElementById('note-view-' + noteId).style.display = 'none';
-            document.getElementById('note-edit-form-' + noteId).style.display = 'block';
+    // Open Case submits the same Case Summary form (via form="case-edit")
+    // instead of requiring Save Changes first - the browser's own
+    // required-field validation on that form (Calculated Value, Recommended
+    // Outcome, etc.) already blocks the submit if anything's missing, so
+    // there's no separate "fill in first" step for the requester to hit.
+    var openCaseBtn = document.getElementById('open-case-btn');
+    var caseEditActionField = document.getElementById('case-edit-action-field');
+    if (openCaseBtn && caseEditActionField) {
+        openCaseBtn.addEventListener('click', function (e) {
+            if (!confirm('Open this case? It will move into the approval workflow.')) {
+                e.preventDefault();
+                return;
+            }
+            caseEditActionField.value = 'open_case';
         });
-    });
-
-    document.querySelectorAll('.note-edit-cancel').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-            var noteId = btn.dataset.noteId;
-            document.getElementById('note-edit-form-' + noteId).style.display = 'none';
-            document.getElementById('note-view-' + noteId).style.display = 'block';
-        });
-    });
+    }
 
     function showEdit() {
         viewEl.style.display = 'none';
         editEl.style.display = 'block';
         toggleBtn.style.display = 'none';
         if (actionsEl) actionsEl.style.display = 'block';
-        deleteForms.forEach(function (f) { f.style.display = 'inline'; });
-        noteActions.forEach(function (s) { s.style.display = 'flex'; });
+        if (bankViewEl) bankViewEl.style.display = 'none';
+        if (bankEditEl) bankEditEl.style.display = 'block';
     }
     function showView() {
         viewEl.style.display = 'block';
         editEl.style.display = 'none';
         toggleBtn.style.display = 'inline-flex';
         if (actionsEl) actionsEl.style.display = 'none';
-        deleteForms.forEach(function (f) { f.style.display = 'none'; });
-        noteActions.forEach(function (s) { s.style.display = 'none'; });
+        if (bankViewEl) bankViewEl.style.display = 'block';
+        if (bankEditEl) bankEditEl.style.display = 'none';
     }
 
     toggleBtn.addEventListener('click', showEdit);
@@ -164,6 +198,39 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     });
 
+});
+
+// Edit/delete controls on individual notes and attachments are now rendered
+// per-item (aapCaseEvidenceItemEditable() in aap_lib.php) rather than tied to
+// the Case Summary edit toggle above - a note added during the Approval
+// stage can stay editable by its own author even once that toggle (and its
+// case-edit/toggleBtn/viewEl elements) no longer exists. querySelectorAll
+// simply returns nothing where no such controls were rendered, so this is
+// safe to run unconditionally.
+document.addEventListener('DOMContentLoaded', function () {
+    document.querySelectorAll('.note-edit-toggle').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var noteId = btn.dataset.noteId;
+            document.getElementById('note-view-' + noteId).style.display = 'none';
+            document.getElementById('note-edit-form-' + noteId).style.display = 'block';
+        });
+    });
+
+    document.querySelectorAll('.note-edit-cancel').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var noteId = btn.dataset.noteId;
+            document.getElementById('note-edit-form-' + noteId).style.display = 'none';
+            document.getElementById('note-view-' + noteId).style.display = 'block';
+        });
+    });
+});
+
+// The "Add New Evidence" form (evidence-add-form/evidence-file-input) is
+// gated by $can_add_evidence, which stays true through the Approval stage
+// even after $can_edit_case (and so the case-edit/toggleBtn/viewEl elements
+// above) has gone away - so this can't live inside that guarded block above,
+// it needs its own independent guard on the elements it actually uses.
+document.addEventListener('DOMContentLoaded', function () {
     // Live preview of files chosen in "Add More Evidence" before the Add
     // button is clicked, each with its own remove button - mirrors the already-saved
     // attachment list's look. A native file input replaces its whole
@@ -172,25 +239,31 @@ document.addEventListener('DOMContentLoaded', function () {
     // via the DataTransfer trick (a FileList is otherwise read-only).
     var evidenceFileInput = document.getElementById('evidence-file-input');
     var evidenceFilePreview = document.getElementById('evidence-file-preview');
+    if (!evidenceFileInput || !evidenceFilePreview) return;
+
+    // Each entry is { file, url } - the blob URL is created exactly once per
+    // file (not on every re-render) and explicitly revoked when the file is
+    // removed or the page unloads, so picking/removing files repeatedly
+    // doesn't leak blob memory and eventually freeze the tab.
     var pendingFiles = [];
 
     function syncFileInput() {
         var dt = new DataTransfer();
-        pendingFiles.forEach(function (f) { dt.items.add(f); });
+        pendingFiles.forEach(function (p) { dt.items.add(p.file); });
         evidenceFileInput.files = dt.files;
     }
 
     function renderFilePreview() {
         evidenceFilePreview.innerHTML = '';
-        pendingFiles.forEach(function (file, index) {
+        pendingFiles.forEach(function (entry, index) {
             var li = document.createElement('li');
 
             var nameLink = document.createElement('a');
-            nameLink.href = URL.createObjectURL(file);
+            nameLink.href = entry.url;
             nameLink.target = '_blank';
             nameLink.rel = 'noopener';
             nameLink.innerHTML = '<i class="bi bi-file-earmark-arrow-up"></i> ';
-            nameLink.appendChild(document.createTextNode(file.name));
+            nameLink.appendChild(document.createTextNode(entry.file.name));
             li.appendChild(nameLink);
 
             var removeBtn = document.createElement('button');
@@ -199,6 +272,7 @@ document.addEventListener('DOMContentLoaded', function () {
             removeBtn.style.cssText = 'background:none; border:none; color:#dc3545; cursor:pointer; padding:0; font-size:13px;';
             removeBtn.innerHTML = '<i class="bi bi-trash"></i>';
             removeBtn.addEventListener('click', function () {
+                URL.revokeObjectURL(entry.url);
                 pendingFiles.splice(index, 1);
                 syncFileInput();
                 renderFilePreview();
@@ -211,9 +285,15 @@ document.addEventListener('DOMContentLoaded', function () {
 
     evidenceFileInput.addEventListener('change', function () {
         Array.prototype.forEach.call(evidenceFileInput.files, function (f) {
-            pendingFiles.push(f);
+            pendingFiles.push({ file: f, url: URL.createObjectURL(f) });
         });
         syncFileInput();
         renderFilePreview();
+    });
+
+    // Release every still-live blob URL on the way out, in case the page is
+    // navigated away from (or re-submitted) with files still pending.
+    window.addEventListener('beforeunload', function () {
+        pendingFiles.forEach(function (p) { URL.revokeObjectURL(p.url); });
     });
 });

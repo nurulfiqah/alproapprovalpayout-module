@@ -8,9 +8,13 @@ if (!isset($conn) || !($conn instanceof mysqli)) {
 }
 require_once('aap_lib.php');
 
-$aap_dept_ids = aapDeptIdsFromCsv($department);
-$aap_is_superadmin = aapFetchIsSuperAdmin($conn, $id_user);
-$aap_is_admin = aapIsAdmin($grade, $aap_dept_ids, $aap_is_superadmin, aapFetchAapLevel($conn, $id_user));
+// Resolves the SuperAdmin/admin-level union used across every AAP page.
+$aap_identity = aapResolveIdentity($conn, $id_user, $grade, $department);
+$grade = $aap_identity['grade'];
+$department = $aap_identity['department'];
+$aap_dept_ids = $aap_identity['dept_ids'];
+$aap_is_admin = $aap_identity['is_admin'];
+$aap_is_superadmin = $aap_identity['is_superadmin'];
 $aap_can_manage_all_depts = aapCanManageAllDepartments($grade, $aap_dept_ids, $aap_is_superadmin);
 $my_dept_id = !empty($aap_dept_ids) ? $aap_dept_ids[0] : null;
 if ((int)$grade < 1 && !$aap_is_admin) {
@@ -42,7 +46,7 @@ $fixit_record = aapFetchFixitRecord($conn, $prefill_fixit_id);
 // Raising is scoped to the Fixit report's own department, same rule as
 // admin/aap_admin.php's Case Type management - any staff member belonging
 // to that department can raise the case (no value/tier check here at all;
-// that's decided later, live, at the Approval Gate via each Case Type's
+// that's decided later, live, at the approval gate via each Case Type's
 // Level 2/3 Staff Tier lists - see aapCanApprove() in aap_lib.php).
 // Full-list here is grade>=4/SuperAdmin/Customer Support
 // (aapCanManageAllDepartments()) PLUS Operations - Operations is not part
@@ -97,6 +101,12 @@ if (isset($_POST['raise_case'])) {
     } elseif ((int)$ct['department_id'] !== (int)$fixit_record['department_id']) {
         $msg = "That Case Type does not belong to this Fixit report's department.";
         $msg_type = "alpro-danger";
+    } elseif (trim($_POST['customer_name'] ?? '') === '' || trim($_POST['customer_membership_id'] ?? '') === '') {
+        // The client-side `required` attribute on both fields already
+        // blocks this in normal use - re-checked here since that alone
+        // never stops a tampered/direct POST.
+        $msg = "Customer Name and Membership ID are required - search and pick a customer first.";
+        $msg_type = "alpro-danger";
     } else {
         // Requester Type / Requesting Channel are no longer collected on this
         // form - Requester Type falls back to 'customer' (Case Type no longer
@@ -106,6 +116,10 @@ if (isset($_POST['raise_case'])) {
         $requester_type      = in_array($_POST['requester_type'] ?? null, ['customer','outlet','bu'], true) ? $_POST['requester_type'] : 'customer';
         $requesting_channel  = trim($_POST['requesting_channel'] ?? '');
         $customer_membership_id = trim($_POST['customer_membership_id']);
+        $customer_name       = trim($_POST['customer_name'] ?? '');
+        $bank_id              = !empty($_POST['bank_id']) ? (int)$_POST['bank_id'] : null;
+        $bank_account_number  = trim($_POST['bank_account_number'] ?? '');
+        $bank_account_holder  = trim($_POST['bank_account_holder'] ?? '');
         $transaction_ref     = trim($_POST['transaction_ref']);
         $evidence_note       = trim($_POST['evidence_note']);
         $calculated_value    = ($_POST['calculated_value'] !== '') ? (float)$_POST['calculated_value'] : null;
@@ -119,19 +133,19 @@ if (isset($_POST['raise_case'])) {
         $stmt = $conn->prepare("
             INSERT INTO aap_cases
                 (case_ref, case_type_id, requester_type, requesting_channel, requester_staff_id, requester_department_id,
-                 customer_membership_id, transaction_ref, evidence_note, calculated_value, value_type, recommended_outcome,
+                 customer_membership_id, customer_name, bank_id, bank_account_number, bank_account_holder, transaction_ref, evidence_note, calculated_value, value_type, recommended_outcome,
                  physical_confirm_required, physical_confirm_status, approval_status, execution_status, case_status,
                  created_by, timestamp, updated_at, fixit_record_id)
             VALUES
                 ('', ?, ?, ?, ?, ?,
-                 ?, ?, ?, ?, ?, ?,
+                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                  ?, ?, 'pending', 'pending', 'draft',
                  ?, ?, ?, ?)
         ");
         $stmt->bind_param(
-            "issiisssdssisissi",
+            "issiississssdssisissi",
             $case_type_id, $requester_type, $requesting_channel, $id_user, $my_dept_id,
-            $customer_membership_id, $transaction_ref, $evidence_note, $calculated_value, $value_type, $recommended_outcome,
+            $customer_membership_id, $customer_name, $bank_id, $bank_account_number, $bank_account_holder, $transaction_ref, $evidence_note, $calculated_value, $value_type, $recommended_outcome,
             $physical_required, $physical_status,
             $id_user, $now, $now, $fixit_record_id
         );
@@ -144,11 +158,22 @@ if (isset($_POST['raise_case'])) {
             $conn->query("UPDATE aap_cases SET case_ref = '" . $conn->real_escape_string($case_ref) . "' WHERE id = " . $new_id);
 
             // Evidence uploads - stored on the corporate NAS, see aapUploadEvidenceFiles()
-            aapUploadEvidenceFiles($conn, $new_id, $_FILES['evidence'] ?? null, $id_user, $now);
+            $evidence_upload_result = aapUploadEvidenceFiles($conn, $new_id, $_FILES['evidence'] ?? null, $id_user, $now);
 
             $audit_note = "Case raised as $case_ref (" . $ct['case_type_name'] . ", " . aapRequesterTypeLabel($requester_type) . ")";
             if ($fixit_record_id) $audit_note .= ", linked from Fixit ticket F$fixit_record_id";
             aapLogAudit($conn, $new_id, 'case_raised', $id_user, $audit_note);
+
+            // Case creation itself redirects straight to aap_update.php rather
+            // than showing a message here - a failed upload still needs to
+            // surface somewhere, so it rides along as that page's own flash
+            // message (aap_update.php already reads $_SESSION['aap_flash_msg']
+            // on load) instead of silently vanishing.
+            $upload_warning = aapUploadFailureNote($evidence_upload_result);
+            if ($upload_warning !== '') {
+                $_SESSION['aap_flash_msg'] = "Case raised." . $upload_warning;
+                $_SESSION['aap_flash_msg_type'] = 'alpro-warn';
+            }
 
             header("Location: aap_update.php?id=$new_id&created=1");
             exit;
@@ -261,25 +286,36 @@ if (isset($_POST['raise_case'])) {
 
             <div class="aap-bento-item aap-span-12">
                 <div class="aap-card">
-                    <h6 class="aap-card-title"><i class="bi bi-file-earmark-text"></i> Case Details</h6>
+                    <div class="aap-card-title-row">
+                        <h6 class="aap-card-title"><i class="bi bi-file-earmark-text"></i> Case Details</h6>
+                        <button type="button" id="case-details-refresh-btn" class="alpro-btn alpro-btn-grey" title="Clear every field in this section" style="padding:4px 12px; font-size:12px;"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
+                    </div>
 
                     <div class="alpro-grid">
                         <div class="alpro-field" style="position:relative;">
-                            <label>Customer / Membership ID</label>
-                            <input class="alpro-input" type="text" name="customer_membership_id" id="customer-lookup-input" placeholder="Type name, IC, or membership ID to search..." autocomplete="off">
-                            <ul id="customer-lookup-results" class="aap-attach-list" style="display:none; position:absolute; z-index:20; left:0; right:0; margin-top:4px; max-height:260px; overflow-y:auto; box-shadow:0 8px 20px rgba(0,0,0,.1);"></ul>
+                            <label>Customer Name <span class="aap-req">*</span>
+                                <span class="aap-admin-info-icon">i<span class="aap-admin-tooltip">Type a name, IC, or membership ID here or in Membership ID to search. Picking a result fills both fields and locks them - use Refresh above to clear this whole section and search again.</span></span>
+                            </label>
+                            <input class="alpro-input" type="text" name="customer_name" id="customer-name-input" autocomplete="off" required>
+                            <ul id="customer-name-results" class="aap-attach-list" style="display:none; position:absolute; z-index:20; left:0; right:0; margin-top:4px; max-height:260px; overflow-y:auto; box-shadow:0 8px 20px rgba(0,0,0,.1);"></ul>
+                        </div>
+
+                        <div class="alpro-field" style="position:relative;">
+                            <label>Membership ID <span class="aap-req">*</span></label>
+                            <input class="alpro-input" type="text" name="customer_membership_id" id="customer-membership-input" autocomplete="off" inputmode="numeric" pattern="[0-9]*" required>
+                            <ul id="customer-membership-results" class="aap-attach-list" style="display:none; position:absolute; z-index:20; left:0; right:0; margin-top:4px; max-height:260px; overflow-y:auto; box-shadow:0 8px 20px rgba(0,0,0,.1);"></ul>
                         </div>
 
                         <div class="alpro-field">
-                            <label>Transaction / SO Number</label>
-                            <input class="alpro-input" type="text" name="transaction_ref">
+                            <label>Transaction No</label>
+                            <input class="alpro-input" type="text" name="transaction_ref" id="case-details-transaction-ref" inputmode="numeric" pattern="[0-9]*">
                         </div>
                     </div>
 
                     <div class="alpro-grid alpro-mt-10">
                         <div class="alpro-field">
                             <label>Calculated Value (Requestor)</label>
-                            <input class="alpro-input" type="number" step="0.01" min="0" name="calculated_value">
+                            <input class="alpro-input" type="number" step="0.01" min="0" name="calculated_value" id="case-details-calculated-value">
                         </div>
 
                         <div class="alpro-field">
@@ -293,8 +329,33 @@ if (isset($_POST['raise_case'])) {
 
                     <div class="alpro-grid alpro-mt-10">
                         <div class="alpro-field" style="grid-column: 1 / -1;">
-                            <label>Recommended Refund / Payout Outcome</label>
-                            <textarea class="alpro-input" name="recommended_outcome" placeholder="e.g. Points, Cash refund, Exchange first" style="height:38px; max-height:150px; resize:vertical; overflow-y:auto;"></textarea>
+                            <label>Report Description</label>
+                            <textarea class="alpro-input" name="recommended_outcome" id="case-details-recommended-outcome" placeholder="e.g. Points, Cash refund, Exchange first" style="height:38px; max-height:150px; resize:vertical; overflow-y:auto;"></textarea>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="aap-bento-item aap-span-12">
+                <div class="aap-card">
+                    <h6 class="aap-card-title"><i class="bi bi-bank"></i> Bank Detail</h6>
+                    <div class="alpro-grid">
+                        <div class="alpro-field">
+                            <label>Bank Name</label>
+                            <select class="alpro-input" name="bank_id">
+                                <option value="">Select Bank</option>
+                                <?php foreach (aapFetchBankMasterOptions($conn) as $bank): ?>
+                                    <option value="<?php echo $bank['id']; ?>"><?php echo htmlspecialchars($bank['bank_name']); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="alpro-field">
+                            <label>Account Number</label>
+                            <input class="alpro-input" type="text" name="bank_account_number" id="bank-account-number-input" inputmode="numeric" pattern="[0-9]*">
+                        </div>
+                        <div class="alpro-field">
+                            <label>Account Holder Name</label>
+                            <input class="alpro-input" type="text" name="bank_account_holder">
                         </div>
                     </div>
                 </div>

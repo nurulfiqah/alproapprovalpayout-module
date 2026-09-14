@@ -26,7 +26,10 @@ select.alpro-input {
 .alpro-badge-confirming       { background: #f39c12; }
 .alpro-badge-pending_approval { background: #fd7e14; }
 .alpro-badge-executing        { background: #16a085; }
+.alpro-badge-executing_suspended { background: #b8860b; }
+.alpro-badge-closing          { background: #20c997; }
 .alpro-badge-closed    { background: #7f8c8d; }
+.alpro-badge-closed_suspended { background: #b8860b; }
 .alpro-badge-rejected  { background: #e74c3c; }
 .alpro-badge-voided    { background: #95a5a6; }
 .alpro-badge-pending   { background: #f39c12; }

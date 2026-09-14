@@ -12,21 +12,45 @@ if (!isset($conn) || !($conn instanceof mysqli)) {
 }
 require_once('../aap_lib.php');
 
-// SuperAdmin-only ("Admin 2", staff.aap = 2) - same tier as
-// aap_settings.php (grants staff.aap itself) and aap_staff_assignments.php.
-// A separate aap_approval_unit column used to let a general grade>=4/
-// Digital Innovation/staff.aap=1 admin ("Admin 1") in without full
-// SuperAdmin - dropped in favour of just checking staff.aap's own level
-// (see aapFetchIsSuperAdmin()/aapFetchAapLevel() in aap_lib.php), since two
-// separate access columns for one module was more confusing than useful.
-// $aap_is_admin is still computed (aap_sidebar.php below needs it to
-// decide whether to show the Settings/Admin/Staff Assignments nav links at
-// all).
-$aap_dept_ids = aapDeptIdsFromCsv($department);
-$aap_is_superadmin = aapFetchIsSuperAdmin($conn, $id_user);
-$aap_is_admin = aapIsAdmin($grade, $aap_dept_ids, $aap_is_superadmin, aapFetchAapLevel($conn, $id_user));
-if (!$aap_is_superadmin) {
-    die("SuperAdmin access only. This page manages the Approval Unit Master.");
+// AAP-admin-only (staff.aap = 1) for the shared Universal list - same tier
+// as aap_settings.php (grants staff.aap itself). $aap_is_admin is still
+// computed (aap_sidebar.php below needs it to decide whether to show the
+// Settings/Admin/Staff Assignments nav links at all).
+$aap_identity = aapResolveIdentity($conn, $id_user, $grade, $department);
+$grade = $aap_identity['grade'];
+$department = $aap_identity['department'];
+$aap_dept_ids = $aap_identity['dept_ids'];
+$aap_is_admin = $aap_identity['is_admin'];
+$aap_is_superadmin = $aap_identity['is_superadmin'];
+$aap_can_manage_all_depts = aapCanManageAllDepartments($grade, $aap_dept_ids, $aap_is_superadmin);
+
+// aap_department_managers - a grade-independent allowlist (see
+// aapFetchDeptManagerDepartmentIds() in aap_lib.php) letting specific staff
+// in here to manage ONLY their own granted department's Groups below -
+// never the shared Universal list above, which stays strictly
+// $aap_is_superadmin-gated throughout this file regardless of this list.
+// Merged into $aap_dept_ids AFTER $aap_can_manage_all_depts is decided, same
+// reasoning as admin/aap_admin.php - a grant here must never accidentally
+// read as "manage every department".
+$aap_manager_dept_ids = aapFetchDeptManagerDepartmentIds($conn, $id_user);
+if (!empty($aap_manager_dept_ids)) {
+    $aap_dept_ids = array_values(array_unique(array_merge($aap_dept_ids, $aap_manager_dept_ids)));
+}
+
+if (!$aap_is_superadmin && empty($aap_manager_dept_ids)) {
+    die("You don't have access to this page. Ask an admin to grant you AAP admin access, or Department Manager access for a specific department.");
+}
+
+// PHP's default session handler locks the session file for the whole
+// request - this page is hit repeatedly via AJAX (Assign/Save/Delete/
+// Customize/etc. below) and never writes to $_SESSION itself, so releasing
+// the lock here lets those requests (and everything else sharing this
+// browser's session, including the notification poll and any other tab)
+// run concurrently instead of queuing up behind whichever one happens to be
+// mid-request - a heavy request here (several nested department/group/tier/
+// staff queries) otherwise blocks the whole app until it finishes.
+if (session_status() === PHP_SESSION_ACTIVE) {
+    session_write_close();
 }
 
 // Named tier list for either the shared Universal list (department_id null,
@@ -171,9 +195,30 @@ function aapFetchTierGrades($conn, $tier_id) {
     return $rows;
 }
 
+// Read-only reference showing this department's own staff mapped onto the
+// Universal grade->tier ladder - i.e. exactly who'd sit where if this
+// department were still following Universal, even after it's Customized
+// with its own Group(s). There's no manual-override layer to consider here
+// (assign_tier_staff only ever writes against a Group's own tier row, never
+// the Universal one - see its own department_id/group_id IS NULL check), so
+// this is pure grade lookup, always shown, and never editable.
+function aapFetchDepartmentDefaultTiers($conn, $department_id) {
+    $tiers = aapFetchApprovalUnitTiers($conn, null);
+    $staff_by_tier = [];
+    foreach (aapFetchGroupStaffTiers($conn, $department_id, 0) as $s) {
+        $staff_by_tier[$s['tier']][] = $s['staff_name'];
+    }
+    foreach ($tiers as &$t) {
+        $t['staff'] = $staff_by_tier[$t['tier_name']] ?? [];
+        unset($t['grades']); // not needed here, keep the payload lean
+    }
+    return $tiers;
+}
+
 // ---- AJAX: fetch every Group a department has set up (each with its own
 // tier list) + whether it has any Groups at all (Custom) or is still empty
-// (follows the Universal list above). ----
+// (follows the Universal list above), plus the always-shown read-only
+// Default reference table (aapFetchDepartmentDefaultTiers() above). ----
 if (isset($_GET['action']) && $_GET['action'] === 'get_department_groups' && $_SERVER['REQUEST_METHOD'] === 'GET') {
     ob_end_clean();
     header('Content-Type: application/json');
@@ -182,8 +227,17 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_department_groups' && $_S
         echo json_encode(['success' => false, 'message' => 'Invalid department.']);
         exit;
     }
+    if (!aapDeptInScope($dept_id, $aap_dept_ids, $aap_can_manage_all_depts)) {
+        echo json_encode(['success' => false, 'message' => 'You do not manage this department.']);
+        exit;
+    }
     $groups = aapFetchDepartmentGroups($conn, $dept_id);
-    echo json_encode(['success' => true, 'is_custom' => count($groups) > 0, 'groups' => $groups]);
+    echo json_encode([
+        'success' => true,
+        'is_custom' => count($groups) > 0,
+        'groups' => $groups,
+        'default_tiers' => aapFetchDepartmentDefaultTiers($conn, $dept_id),
+    ]);
     exit;
 }
 
@@ -194,16 +248,22 @@ if (isset($_POST['action']) && $_POST['action'] === 'add_group' && $_SERVER['REQ
     ob_end_clean();
     header('Content-Type: application/json');
     $dept_id = (int)($_POST['department_id'] ?? 0);
-    $group_name = trim($_POST['group_name'] ?? '');
     $description = trim($_POST['description'] ?? '');
     if ($dept_id <= 0) {
         echo json_encode(['success' => false, 'message' => 'Invalid department.']);
         exit;
     }
-    if ($group_name === '') {
-        $count_res = $conn->query("SELECT COUNT(*) c FROM aap_approval_unit_tier_groups WHERE department_id = " . $dept_id);
-        $group_name = 'Group ' . ((int)$count_res->fetch_assoc()['c'] + 1);
+    if (!aapDeptInScope($dept_id, $aap_dept_ids, $aap_can_manage_all_depts)) {
+        echo json_encode(['success' => false, 'message' => 'You do not manage this department.']);
+        exit;
     }
+    // Group Name is always auto-assigned "Group N" and fixed from here on -
+    // never client-supplied, so every dropdown that lists Groups elsewhere
+    // (e.g. admin/aap_admin.php's Level 2/3 Staff Tier picker) can rely on
+    // it as a stable identifier. Only Description is admin-editable - see
+    // update_group below.
+    $count_res = $conn->query("SELECT COUNT(*) c FROM aap_approval_unit_tier_groups WHERE department_id = " . $dept_id);
+    $group_name = 'Group ' . ((int)$count_res->fetch_assoc()['c'] + 1);
     $now = date('Y-m-d H:i:s');
     $sort_res = $conn->query("SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM aap_approval_unit_tier_groups WHERE department_id = " . $dept_id);
     $sort_order = (int)$sort_res->fetch_assoc()['n'];
@@ -227,15 +287,16 @@ if (isset($_POST['action']) && $_POST['action'] === 'add_group' && $_SERVER['REQ
     exit;
 }
 
-// ---- AJAX: rename/re-describe a Group. ----
+// ---- AJAX: re-describe a Group - Description only, Group Name is fixed
+// from creation and never changes (see add_group above), so every
+// dropdown that lists Groups elsewhere keeps a stable identifier. ----
 if (isset($_POST['action']) && $_POST['action'] === 'update_group' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     ob_end_clean();
     header('Content-Type: application/json');
     $group_id = (int)($_POST['group_id'] ?? 0);
-    $group_name = trim($_POST['group_name'] ?? '');
     $description = trim($_POST['description'] ?? '');
-    if ($group_id <= 0 || $group_name === '') {
-        echo json_encode(['success' => false, 'message' => 'Group name is required.']);
+    if ($group_id <= 0) {
+        echo json_encode(['success' => false, 'message' => 'Invalid group.']);
         exit;
     }
     $group_dept_row = $conn->query("SELECT department_id FROM aap_approval_unit_tier_groups WHERE id = " . $group_id)->fetch_assoc();
@@ -243,9 +304,13 @@ if (isset($_POST['action']) && $_POST['action'] === 'update_group' && $_SERVER['
         echo json_encode(['success' => false, 'message' => 'Invalid group.']);
         exit;
     }
+    if (!aapDeptInScope($group_dept_row['department_id'], $aap_dept_ids, $aap_can_manage_all_depts)) {
+        echo json_encode(['success' => false, 'message' => 'You do not manage this department.']);
+        exit;
+    }
     $now = date('Y-m-d H:i:s');
-    $stmt = $conn->prepare("UPDATE aap_approval_unit_tier_groups SET group_name = ?, description = ?, updated_by = ?, timestamp = ? WHERE id = ?");
-    $stmt->bind_param("ssisi", $group_name, $description, $id_user, $now, $group_id);
+    $stmt = $conn->prepare("UPDATE aap_approval_unit_tier_groups SET description = ?, updated_by = ?, timestamp = ? WHERE id = ?");
+    $stmt->bind_param("sisi", $description, $id_user, $now, $group_id);
     $ok = $stmt->execute();
     $stmt->close();
     echo json_encode(['success' => $ok]);
@@ -268,6 +333,10 @@ if (isset($_POST['action']) && $_POST['action'] === 'delete_group' && $_SERVER['
         echo json_encode(['success' => false, 'message' => 'Invalid group.']);
         exit;
     }
+    if (!aapDeptInScope($dept_row['department_id'], $aap_dept_ids, $aap_can_manage_all_depts)) {
+        echo json_encode(['success' => false, 'message' => 'You do not manage this department.']);
+        exit;
+    }
     $conn->query("DELETE FROM aap_approval_unit_tiers WHERE group_id = " . $group_id);
     $conn->query("DELETE FROM aap_approval_unit_tier_groups WHERE id = " . $group_id);
     echo json_encode(['success' => true, 'groups' => $dept_row ? aapFetchDepartmentGroups($conn, (int)$dept_row['department_id']) : []]);
@@ -281,6 +350,10 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_dept_staff_pool' && $_SER
     $dept_id = (int)($_GET['department_id'] ?? 0);
     if ($dept_id <= 0) {
         echo json_encode(['success' => false, 'message' => 'Invalid department.']);
+        exit;
+    }
+    if (!aapDeptInScope($dept_id, $aap_dept_ids, $aap_can_manage_all_depts)) {
+        echo json_encode(['success' => false, 'message' => 'You do not manage this department.']);
         exit;
     }
     echo json_encode(['success' => true, 'staff' => aapFetchDeptStaffPool($conn, $dept_id)]);
@@ -304,6 +377,10 @@ if (isset($_POST['action']) && $_POST['action'] === 'assign_tier_staff' && $_SER
     $tier_row = $conn->query("SELECT department_id, group_id FROM aap_approval_unit_tiers WHERE id = " . $tier_id)->fetch_assoc();
     if (!$tier_row || $tier_row['department_id'] === null || $tier_row['group_id'] === null) {
         echo json_encode(['success' => false, 'message' => 'Invalid group tier.']);
+        exit;
+    }
+    if (!aapDeptInScope($tier_row['department_id'], $aap_dept_ids, $aap_can_manage_all_depts)) {
+        echo json_encode(['success' => false, 'message' => 'You do not manage this department.']);
         exit;
     }
     $conn->query("
@@ -332,6 +409,10 @@ if (isset($_POST['action']) && $_POST['action'] === 'unassign_tier_staff' && $_S
         echo json_encode(['success' => false, 'message' => 'Invalid tier.']);
         exit;
     }
+    if (!aapDeptInScope($tier_row['department_id'], $aap_dept_ids, $aap_can_manage_all_depts)) {
+        echo json_encode(['success' => false, 'message' => 'You do not manage this department.']);
+        exit;
+    }
     $conn->query("DELETE FROM aap_approval_unit_tier_staff WHERE tier_id = $tier_id AND staff_id = $staff_id");
     echo json_encode(['success' => true]);
     exit;
@@ -352,6 +433,62 @@ if (isset($_POST['action']) && $_POST['action'] === 'update_tier' && $_SERVER['R
         echo json_encode(['success' => false, 'message' => 'Tier name is required.']);
         exit;
     }
+
+    // Tiers form a fixed ladder (Tier 0 lowest ... Unlimited highest, per
+    // sort_order) - a tier's RM ceiling must stay between its immediate
+    // neighbors' so the ladder never crosses itself (e.g. Tier 1 costing
+    // more than Tier 2 would silently let a Tier 1 holder approve more than
+    // a Tier 2 holder, which the picker's tier-name-only display would
+    // then hide). Checked only against the SAME list (Universal, or one
+    // Group) - every Group has its own independent ladder. Unlimited
+    // (tier_value NULL) is treated as +infinity for this comparison, so a
+    // lower-ranked tier can't be set to Unlimited while a higher-ranked one
+    // still has a finite cap.
+    $scope_row = $conn->query("SELECT department_id, group_id FROM aap_approval_unit_tiers WHERE id = " . $tier_id)->fetch_assoc();
+    if (!$scope_row) {
+        echo json_encode(['success' => false, 'message' => 'Tier not found.']);
+        exit;
+    }
+    // The shared Universal list (department_id NULL) stays strictly
+    // admin-only - a Department Manager grant never extends to it,
+    // only to that department's own Group tiers.
+    if ($scope_row['department_id'] === null) {
+        if (!$aap_is_superadmin) {
+            echo json_encode(['success' => false, 'message' => 'Admin access only.']);
+            exit;
+        }
+    } elseif (!aapDeptInScope($scope_row['department_id'], $aap_dept_ids, $aap_can_manage_all_depts)) {
+        echo json_encode(['success' => false, 'message' => 'You do not manage this department.']);
+        exit;
+    }
+    $scope_sql = $scope_row['department_id'] === null
+        ? "department_id IS NULL AND group_id IS NULL"
+        : "group_id = " . (int)$scope_row['group_id'];
+    $ladder = $conn->query("SELECT id, tier_name, tier_value FROM aap_approval_unit_tiers WHERE $scope_sql ORDER BY sort_order ASC")->fetch_all(MYSQLI_ASSOC);
+    $pos = null;
+    foreach ($ladder as $i => $t) {
+        if ((int)$t['id'] === $tier_id) { $pos = $i; break; }
+    }
+    $effective = function ($v) { return $v === null ? INF : (float)$v; };
+    $new_effective = $effective($tier_value);
+
+    if ($pos !== null && $pos > 0) {
+        $higher = $ladder[$pos - 1];
+        if ($new_effective > $effective($higher['tier_value'])) {
+            echo json_encode(['success' => false, 'message' =>
+                $higher['tier_name'] . "'s own value (" . ($higher['tier_value'] === null ? 'Unlimited' : 'RM ' . number_format((float)$higher['tier_value'], 2)) . ") is lower than what you're trying to set here - raise " . $higher['tier_name'] . " first."]);
+            exit;
+        }
+    }
+    if ($pos !== null && $pos < count($ladder) - 1) {
+        $lower = $ladder[$pos + 1];
+        if ($new_effective < $effective($lower['tier_value'])) {
+            echo json_encode(['success' => false, 'message' =>
+                $lower['tier_name'] . "'s own value (" . ($lower['tier_value'] === null ? 'Unlimited' : 'RM ' . number_format((float)$lower['tier_value'], 2)) . ") is higher than what you're trying to set here - lower " . $lower['tier_name'] . " first."]);
+            exit;
+        }
+    }
+
     $stmt = $conn->prepare("UPDATE aap_approval_unit_tiers SET tier_value = ?, updated_by = ?, timestamp = ? WHERE id = ? AND tier_name = ?");
     $now = date('Y-m-d H:i:s');
     $stmt->bind_param("disis", $tier_value, $id_user, $now, $tier_id, $tier_name);
@@ -409,6 +546,15 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_tier_impact' && $_SERVER[
         echo json_encode(['success' => false, 'message' => 'Invalid tier.']);
         exit;
     }
+    if ($dept_id === null) {
+        if (!$aap_is_superadmin) {
+            echo json_encode(['success' => false, 'message' => 'Admin access only.']);
+            exit;
+        }
+    } elseif (!aapDeptInScope($dept_id, $aap_dept_ids, $aap_can_manage_all_depts)) {
+        echo json_encode(['success' => false, 'message' => 'You do not manage this department.']);
+        exit;
+    }
     echo json_encode(array_merge(['success' => true], aapTierImpact($conn, $dept_id, $tier_name)));
     exit;
 }
@@ -424,13 +570,27 @@ if (isset($_POST['action']) && $_POST['action'] === 'revert_department' && $_SER
         echo json_encode(['success' => false, 'message' => 'Invalid department.']);
         exit;
     }
+    if (!aapDeptInScope($dept_id, $aap_dept_ids, $aap_can_manage_all_depts)) {
+        echo json_encode(['success' => false, 'message' => 'You do not manage this department.']);
+        exit;
+    }
     $conn->query("DELETE FROM aap_approval_unit_tiers WHERE department_id = " . $dept_id);
     $conn->query("DELETE FROM aap_approval_unit_tier_groups WHERE department_id = " . $dept_id);
     echo json_encode(['success' => true]);
     exit;
 }
 
+// A Department Manager (not a real SuperAdmin) only ever sees their own
+// granted department(s) here - same aapDeptInScope() rule the AJAX
+// endpoints above enforce for real, this just keeps the list from showing
+// departments they'd immediately get "You do not manage this department"
+// errors trying to open anyway.
 $departments = aapFetchDepartments($conn);
+if (!$aap_can_manage_all_depts) {
+    $departments = array_values(array_filter($departments, function ($d) use ($aap_dept_ids) {
+        return in_array((int)$d['id'], $aap_dept_ids, true);
+    }));
+}
 $default_tiers = aapFetchApprovalUnitTiers($conn, null);
 $aap_base = '../';
 ?>
@@ -446,6 +606,7 @@ $aap_base = '../';
 <?php include('../aap_sidebar.php'); ?>
 
 <div class="aap-modern">
+<?php if ($aap_is_superadmin): ?>
 <div class="aap-card alpro-mt-20">
     <h3 class="aap-card-title">Universal</h3>
     <p class="alpro-muted" style="font-size:12px; margin-top:-6px;">
@@ -456,11 +617,14 @@ $aap_base = '../';
         <tbody id="default_tier_tbody"></tbody>
     </table>
 </div>
+<?php endif; ?>
 
 <div class="aap-card alpro-mt-20">
     <h3 class="aap-card-title">Department Tiers</h3>
     <p class="alpro-muted" style="font-size:12px; margin-top:-6px;">
-        Every department, collapsed by default - open one to see whether it follows the Universal tiers above, or has its own Group(s), each with independent RM values for the same 6 fixed tiers.
+        <?php echo $aap_can_manage_all_depts
+            ? 'Every department, collapsed by default - open one to see whether it follows the Universal tiers above, or has its own Group(s), each with independent RM values for the same 6 fixed tiers.'
+            : 'Departments you manage - open one to see whether it follows the Universal tiers, or has its own Group(s), each with independent RM values for the same 6 fixed tiers.'; ?>
     </p>
 
     <div class="aap-filter-bar">
@@ -475,6 +639,19 @@ $aap_base = '../';
             <p class="dept-status" style="margin:6px 0 10px; font-size:13px;">Loading...</p>
             <button type="button" class="alpro-btn alpro-btn-blue dept-customize-btn" style="display:none; margin-bottom:12px;">Customize for this Department</button>
             <button type="button" class="alpro-btn alpro-btn-grey dept-revert-btn" style="display:none; margin-bottom:12px;">Revert to Universal</button>
+
+            <!-- Read-only reference: this department's own staff mapped onto
+            the Universal grade->tier ladder, regardless of whether it's since
+            Customized with its own Group(s) below - not editable, purely for
+            comparison while setting up Groups. See aapFetchDepartmentDefaultTiers()
+            in aap_grouping_master.php. -->
+            <div class="dept-default-block" style="margin-bottom:14px;">
+                <p class="alpro-muted" style="font-size:12px; margin:0 0 6px; font-weight:600;">Default (reference only - follows Universal, not editable here)</p>
+                <table class="alpro-table aap-ct-list-table" width="100%" style="max-width:760px;">
+                    <thead><tr><th>Tier</th><th>RM Value</th><th>Staff Name</th></tr></thead>
+                    <tbody class="dept-default-tbody"></tbody>
+                </table>
+            </div>
 
             <div class="dept-edit" style="display:none;">
                 <div class="dept-groups-container"></div>

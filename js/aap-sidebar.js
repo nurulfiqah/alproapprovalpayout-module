@@ -47,6 +47,7 @@
                 case_approved: 'Case ' + ref + ' has been approved',
                 case_rejected: 'Case ' + ref + ' has been rejected',
                 case_closed: 'Case ' + ref + ' has been closed',
+                case_suspended: 'Case ' + ref + ' was suspended by Execution and needs your attention',
                 pending_approval: 'Case ' + ref + ' is awaiting your approval'
             };
             var snippet = snippets[n.type] || ('Case ' + ref + ' has an update');
@@ -58,8 +59,23 @@
         list.innerHTML = html;
     }
 
+    // Guards against overlapping polls (a previous fetch still pending when
+    // the next 8s tick fires, e.g. because the endpoint was momentarily
+    // slow) and against polling at all while the tab is hidden - every AAP
+    // page runs this poll forever in the background, so left unchecked it
+    // can quietly stack up pending same-origin requests behind whatever
+    // fetch-based action the user is actually trying to click (search
+    // dropdowns, AJAX buttons), which share the browser's small per-origin
+    // connection limit and end up queued behind the pile-up - a real click
+    // going nowhere until one of the stuck polls finally resolves. A 10s
+    // abort timeout keeps one genuinely hung request from blocking forever.
+    var pollInFlight = false;
     function refresh() {
-        fetch(API_URL + '?action=listNotifications')
+        if (pollInFlight || document.hidden) return;
+        pollInFlight = true;
+        var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+        var timeoutId = controller ? setTimeout(function () { controller.abort(); }, 10000) : null;
+        fetch(API_URL + '?action=listNotifications', controller ? { signal: controller.signal } : undefined)
             .then(function (r) { return r.json(); })
             .then(function (res) {
                 if (res && res.success) {
@@ -67,8 +83,15 @@
                     renderList(res.data || []);
                 }
             })
-            .catch(function () {});
+            .catch(function () {})
+            .finally(function () {
+                if (timeoutId) clearTimeout(timeoutId);
+                pollInFlight = false;
+            });
     }
+    document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) refresh();
+    });
 
     document.addEventListener('click', function (e) {
         var bell = e.target.closest('#aap-notif-bell');

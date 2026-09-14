@@ -23,34 +23,43 @@ document.addEventListener('DOMContentLoaded', function () {
         return p;
     }
 
-    // One Department -> Group -> Add -> table block. Level 2 (approval) and
-    // Level 3 (exclusion) each get their own independent instance (own
-    // dropdowns, own table) via distinct element id suffixes - see
-    // aap_admin.php. Returns { addRow, collectRows } so the submit handler
-    // below can serialize the table and edit-mode prefill can push existing
-    // rows in.
+    // One Department -> Group table block. Level 2 (approval) and Level 3
+    // (exclusion) each get their own independent instance (own dropdowns,
+    // own table) via distinct element id suffixes - see aap_admin.php.
+    // Returns { addRow, collectRows } so edit-mode prefill can push existing
+    // rows in and the submit handler below can serialize the table.
     //
-    // Add no longer picks one staff member at a time - it bulk-adds every
-    // staff member belonging to the selected Group (admin/aap_grouping_master.php),
-    // each starting at the tier they hold there. Each row's Tier cell is its
-    // own inline <select>, populated with that row's own department's real
-    // tier names/values, so an HOD who disagrees can change it any time
-    // without re-adding.
+    // Only one Group per level - picking a Group replaces the whole table
+    // with every staff member belonging to it (admin/aap_grouping_master.php),
+    // each starting at the tier they hold there, no explicit Add step.
+    // Picking a different Group (or clearing the Department) replaces/clears
+    // the table rather than appending to it. Each row's Tier cell shows that
+    // row's own department's real tier name/value, read-only - fix it at the
+    // Group (Approval Unit Master) and re-pick if it's wrong.
     function initStaffTier(ids) {
         var deptSelect = document.getElementById(ids.dept);
         var groupSelect = document.getElementById(ids.group);
-        var tierAddBtn = document.getElementById(ids.add);
         var tierTbody = document.getElementById(ids.tbody);
         if (!deptSelect) return null;
 
+        // Group Name alone ("Group 1") isn't enough to tell Groups apart -
+        // Description is what an admin actually set it up for (e.g.
+        // "Academy Moodle"), so show both: "Group 1: Academy Moodle".
+        // Falls back to just the name if no Description has been set yet.
         function renderGroupOptions(groups) {
             if (!groupSelect) return;
             groupSelect.innerHTML = '<option value="">Select Group</option>' + groups.map(function (g) {
-                return '<option value="' + g.id + '">' + esc(g.group_name) + '</option>';
+                var label = g.description ? (g.group_name + ': ' + g.description) : g.group_name;
+                return '<option value="' + g.id + '">' + esc(label) + '</option>';
             }).join('');
         }
 
-        function loadDeptGroups() {
+        // preselectGroupId is only ever passed on the very first load (the
+        // Case Type's already-saved Group, if any) - once the picker's up and
+        // running, a later "change" on the Department select means the user
+        // is actively re-picking, so that always starts back at "Select
+        // Group" rather than trying to guess a group in the new department.
+        function loadDeptGroups(preselectGroupId) {
             if (!groupSelect) return;
             var deptId = deptSelect.value;
             if (!deptId) {
@@ -61,14 +70,30 @@ document.addEventListener('DOMContentLoaded', function () {
                 .then(function (r) { return r.json(); })
                 .then(function (res) {
                     renderGroupOptions(res.success ? res.groups : []);
+                    if (preselectGroupId !== undefined && preselectGroupId !== null) {
+                        var opt = groupSelect.querySelector('option[value="' + preselectGroupId + '"]');
+                        // The already-saved assignment was Default (Universal),
+                        // but this department has since set up its own Group(s)
+                        // - get_dept_groups only offers Default as a fallback
+                        // when there are NONE, so it won't be in the list here.
+                        // Add it back in just so what's actually saved still
+                        // shows correctly, instead of a blank "Select Group".
+                        if (!opt && preselectGroupId === '0') {
+                            opt = document.createElement('option');
+                            opt.value = '0';
+                            opt.textContent = 'Default (Universal)';
+                            groupSelect.insertBefore(opt, groupSelect.options[1] || null);
+                        }
+                        if (opt) groupSelect.value = preselectGroupId;
+                    }
                 })
                 .catch(function () {
                     renderGroupOptions([]);
                 });
         }
 
-        deptSelect.addEventListener('change', loadDeptGroups);
-        loadDeptGroups();
+        deptSelect.addEventListener('change', function () { loadDeptGroups(); });
+        loadDeptGroups(ids.currentGroupId);
 
         function fetchGroupStaffTiers(deptId, groupId) {
             return fetch('?action=get_group_staff_tiers&department_id=' + encodeURIComponent(deptId) + '&group_id=' + encodeURIComponent(groupId))
@@ -115,10 +140,13 @@ document.addEventListener('DOMContentLoaded', function () {
             });
         }
 
-        if (tierAddBtn && groupSelect) {
-            tierAddBtn.addEventListener('click', function () {
+        // Picking a Group fully replaces the table - it's this level's only
+        // Group, not one of several being accumulated.
+        if (groupSelect) {
+            groupSelect.addEventListener('change', function () {
                 var groupId = groupSelect.value;
                 var deptId = deptSelect.value;
+                tierTbody.innerHTML = '';
                 if (!groupId || !deptId) return;
                 fetchGroupStaffTiers(deptId, groupId).then(function (staff) {
                     staff.forEach(function (st) {
@@ -127,6 +155,10 @@ document.addEventListener('DOMContentLoaded', function () {
                 });
             });
         }
+        // Clearing/changing the Department invalidates whatever Group was
+        // picked under the previous one - clear the table so it can't
+        // silently keep a stale department's staff.
+        deptSelect.addEventListener('change', function () { tierTbody.innerHTML = ''; });
 
         function collectRows() {
             return Array.prototype.map.call(tierTbody.querySelectorAll('tr'), function (tr) {
@@ -142,40 +174,20 @@ document.addEventListener('DOMContentLoaded', function () {
         return { addRow: addRow, collectRows: collectRows, deptSelect: deptSelect };
     }
 
-    var approvalTier = initStaffTier({ dept: 'ct_pool_department', group: 'ct_pool_group', add: 'ct_tier_add', tbody: 'ct_staff_tier_tbody' });
-    var exclusionTier = initStaffTier({ dept: 'ct_pool_department_lvl3', group: 'ct_pool_group_lvl3', add: 'ct_tier_add_lvl3', tbody: 'ct_staff_tier_tbody_lvl3' });
-
-    // Level 1's Department is almost always the same department Level 2/3
-    // staff get picked from, but the pickers previously always started blank -
-    // forcing a reselect every time. Sync them on load and whenever Level 1
-    // changes, unless the admin has already manually chosen a different
-    // department in a picker (tracked via a "touched" flag so we never yank
-    // a deliberate choice back).
-    var level1DeptSelect = document.querySelector('select[name="department_id_ct"]');
-    if (level1DeptSelect) {
-        var syncing = false;
-        [approvalTier, exclusionTier].forEach(function (picker) {
-            if (!picker || !picker.deptSelect) return;
-            picker.deptSelect.addEventListener('change', function () {
-                if (!syncing) picker.deptSelect.dataset.touched = '1';
-            });
-        });
-        function syncPickerDepts() {
-            var val = level1DeptSelect.value;
-            if (!val) return;
-            syncing = true;
-            [approvalTier, exclusionTier].forEach(function (picker) {
-                if (!picker || !picker.deptSelect) return;
-                if (picker.deptSelect.dataset.touched === '1') return;
-                if (picker.deptSelect.value === val) return;
-                picker.deptSelect.value = val;
-                picker.deptSelect.dispatchEvent(new Event('change'));
-            });
-            syncing = false;
-        }
-        level1DeptSelect.addEventListener('change', syncPickerDepts);
-        syncPickerDepts();
+    // The Group dropdown itself doesn't carry a "current selection" from the
+    // server the way the Department dropdown does - it's derived here from
+    // whichever Group the already-saved rows actually belong to (they can
+    // only ever belong to one, per Case Type/section). null group_id on a
+    // saved row means the Default (Universal) entry, whose option value is
+    // the "0" sentinel (see aapFetchDepartmentGroupNames() in aap_lib.php).
+    function firstGroupId(tiers) {
+        if (!tiers || !tiers.length) return null;
+        var g = tiers[0].group_id;
+        return (g === null || g === undefined) ? '0' : String(g);
     }
+
+    var approvalTier = initStaffTier({ dept: 'ct_pool_department', group: 'ct_pool_group', tbody: 'ct_staff_tier_tbody', currentGroupId: firstGroupId(AAP_ADMIN.approvalTiers) });
+    var exclusionTier = initStaffTier({ dept: 'ct_pool_department_lvl3', group: 'ct_pool_group_lvl3', tbody: 'ct_staff_tier_tbody_lvl3', currentGroupId: firstGroupId(AAP_ADMIN.exclusionTiers) });
 
     // Editing an existing Case Type - prefill both tables from what's already
     // saved (AAP_ADMIN.approvalTiers/exclusionTiers, from aap_admin.php).
@@ -195,9 +207,26 @@ document.addEventListener('DOMContentLoaded', function () {
     var approvalJsonInput = document.getElementById('ct_approval_tiers_json');
     var exclusionJsonInput = document.getElementById('ct_exclusion_tiers_json');
     if (form) {
-        form.addEventListener('submit', function () {
-            if (approvalTier && approvalJsonInput) approvalJsonInput.value = JSON.stringify(approvalTier.collectRows());
-            if (exclusionTier && exclusionJsonInput) exclusionJsonInput.value = JSON.stringify(exclusionTier.collectRows());
+        form.addEventListener('submit', function (e) {
+            var approvalRows = approvalTier ? approvalTier.collectRows() : [];
+            var exclusionRows = exclusionTier ? exclusionTier.collectRows() : [];
+            if (approvalJsonInput) approvalJsonInput.value = JSON.stringify(approvalRows);
+            if (exclusionJsonInput) exclusionJsonInput.value = JSON.stringify(exclusionRows);
+
+            // Level 2/3 Staff Tier and Description are all required (server
+            // re-checks this too - see aap_admin.php's save_case_type
+            // handler) - a Case Type nobody can approve or execute under
+            // isn't useful to save.
+            if (!approvalRows.length) {
+                e.preventDefault();
+                alert('At least one Group must be added under Level 2 - Approval Mode Assign.');
+                return;
+            }
+            if (!exclusionRows.length) {
+                e.preventDefault();
+                alert('At least one Group must be added under Level 3 - Approval Exclusion Assign.');
+                return;
+            }
         });
     }
 
@@ -224,7 +253,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
         function matching() {
             var name = nameInput.value.trim().toLowerCase();
-            var dept = deptSelect.value;
+            var dept = deptSelect ? deptSelect.value : '';
             var approval = approvalInput.value.trim().toLowerCase();
             var exclusion = exclusionInput.value.trim().toLowerCase();
             var physical = physicalSelect.value;
@@ -326,6 +355,7 @@ document.addEventListener('DOMContentLoaded', function () {
             el.addEventListener('input', function () { currentPage = 1; renderPage(); });
         });
         [deptSelect, physicalSelect, statusSelect, pageSizeSelect].forEach(function (el) {
+            if (!el) return;
             el.addEventListener('change', function () { currentPage = 1; renderPage(); });
         });
 
