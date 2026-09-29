@@ -8,10 +8,12 @@ Alpro intranet app as a sub-module — it does not run standalone.
 A **case** in AAP tracks a compensation/refund/adjustment payout from request
 to payout, through three parallel checks:
 
-- **Physical confirmation** — for case types that require a physical item to
-  be returned (Operations tags it, then confirms receipt).
+- **Verification** — for case types that require it, Operations tags and
+  confirms whatever the department needs verified for that case (e.g. a
+  returned item, a receipt, or other proof — it varies by department/case
+  type).
 - **Approval** — an eligible approver signs off on the payout, within their
-  personal RM approval ceiling.
+  assigned tier's RM ceiling.
 - **Execution** — Operations pays out and closes the case.
 
 ### Case lifecycle
@@ -21,16 +23,18 @@ Approval Case", or picked up from the "Incoming from Fixit" queue) — there is
 no way to open a case from scratch.
 
 ```
-draft → open → (confirm physical / approve / execute) → executed → closed
-                                  |
-                                  └─→ rejected / voided (terminal exits)
+draft → open → (verify / approve / execute) → executed → closed
+                        ↑         |                          |
+                        └── suspend (from Execution) ─────────┘
+                  |
+                  └─→ rejected / voided (terminal exits)
 ```
 
 - **draft** — case created, evidence being gathered (attachments/notes).
   Can still be edited or voided by the issuer or an admin.
 - **open** — required fields filled in (value, value type, recommended
-  outcome). From here the case moves through physical confirmation (if
-  required), approval, and execution.
+  outcome). From here the case moves through verification (if required),
+  approval, and execution.
 - **executed** — approved and paid out, awaiting close.
 - **closed** — final state; requester is notified.
 - **rejected** — approver declined the case.
@@ -51,15 +55,16 @@ per-module SuperAdmin flag and an explicit Department Manager grant:
 
 | Role | Who | Can do |
 |---|---|---|
-| **Admin** | grade ≥ 4, dept 16 (Digital Innovation), or SuperAdmin | Everything, bypasses approval pool/ceiling checks |
+| **Admin** | grade ≥ 4, dept 16 (Digital Innovation), or SuperAdmin | Everything, bypasses approval/exclusion checks |
 | **Department Manager** | staff granted a department via `aap_department_managers` | Manage that department's Case Types, Approval Unit Groups, and Staff Assignments — additive only, never removes existing grade/department access |
-| **Operations** | dept 13 | Tag/confirm physical returns, execute, close (and suspend) cases |
-| **Customer Support** | dept 27 | Approve `cs_tier` case types (alongside Operations) |
-| **Approver** | staff assigned a tier slot in `aap_case_type_staff_tiers`, resolved against `aap_approval_unit_tier_groups` | Approve/reject up to the RM ceiling of their assigned tier (Unlimited/Tier 4–0) |
+| **Operations** (dept 13) | grade ≥ 1 | Tag/confirm verification, execute, close (and suspend) cases across every department |
+| **Approver** | staff assigned to the **Approval** section of a specific Case Type (`aap_case_type_staff_tiers`), at a tier covering the case's value, and not on that Case Type's **Exclusion** list | Approve/reject that Case Type's cases — this is entirely per Case Type, set up when the Case Type is configured, not a fixed department role |
+| **Customer Support** | dept 27, on a case they raised themselves | Can act on their own case at any value, without needing to be on that Case Type's Staff Tier list |
 | **Everyone else** | any staff | Sees only cases they or their department raised |
 
 Approval authority is resolved through a tier system rather than a flat
-per-staff ceiling:
+per-staff ceiling, and is entirely configured per Case Type — there is no
+hardcoded department that "owns" approval for a type of case:
 
 - **Approval Unit Tiers** (`admin/aap_grouping_master.php`) — each department
   has one or more named **Groups**, each holding a fixed 6-tier ladder
@@ -67,13 +72,16 @@ per-staff ceiling:
   Group of its own falls back to the shared "Universal" tier values.
   Individual staff can be manually overridden to a different tier within a
   Group.
-- **Case Type Registry** (`admin/aap_admin.php`) — each Case Type assigns
-  specific staff to specific tiers (`aap_case_type_staff_tiers`), which is
-  what actually grants approval rights for that Case Type.
+- **Case Type Registry** (`admin/aap_admin.php`) — when a Case Type is
+  created/edited, specific staff are assigned to specific tiers for it
+  (`aap_case_type_staff_tiers`, section `approval`) — this assignment is what
+  actually grants approval rights, and is independent per Case Type. Staff
+  can also be explicitly excluded from a Case Type (section `exclusion`)
+  even if they'd otherwise qualify via a tier.
 - **Staff Assignments** (`admin/aap_staff_assignments.php`) — lets a
   superadmin (or a Department Manager, scoped to their department) look up a
-  staff member and reassign/remove every tier slot they hold at once — built
-  for offboarding.
+  staff member and reassign/remove every tier slot they hold across every
+  Case Type at once — built for offboarding.
 
 The SuperAdmin roster and Department Manager grants are managed in
 `admin/aap_settings.php` / `admin/aap_department_managers.php`.

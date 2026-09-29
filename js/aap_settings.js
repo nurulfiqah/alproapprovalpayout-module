@@ -14,8 +14,10 @@
         }
     }
 
-    // staff.aap is just a flag now (0/1) - see aapFetchAapLevel()/
-    // aapFetchIsSuperAdmin() in aap_lib.php.
+    // This panel is Admin-only (staff.aap = 1) - Department Managers
+    // (aap = 2) are excluded server-side and managed on their own page
+    // instead (admin/aap_department_managers.php), so this only ever needs
+    // to distinguish Admin from No Access.
     function levelLabel(level) {
         return level === 1 ? 'Admin' : 'No Access';
     }
@@ -125,6 +127,17 @@
         });
         filterNameEl.addEventListener('keydown', function (e) {
             if (e.key === 'Enter') applyBtn.click();
+        });
+        // Live search as you type - matches anywhere in the name (see the
+        // %...% LIKE on the server), debounced so it doesn't fire a request
+        // on every single keystroke while still typing.
+        var liveSearchTimer = null;
+        filterNameEl.addEventListener('input', function () {
+            if (liveSearchTimer) clearTimeout(liveSearchTimer);
+            liveSearchTimer = setTimeout(function () {
+                nameFilter = filterNameEl.value.trim();
+                loadStaff(1);
+            }, 350);
         });
 
         function resetForm() {

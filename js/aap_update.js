@@ -1,3 +1,66 @@
+// Report Description on the Approval gate is only mandatory when it's
+// actually explaining something: rejecting a case, or approving it at a
+// different value than what was requested. A straight approval at the
+// requested value needs no explanation. Server-side (aap_update.php's
+// approve/reject handler) enforces this for real - this is just the
+// same rule surfaced live in the UI (asterisk + hint) and checked again on
+// submit so the approver isn't sent on an extra round trip to find out.
+document.addEventListener('DOMContentLoaded', function () {
+    var form = document.getElementById('approval-gate-form');
+    var valueInput = document.getElementById('approved-value-input');
+    var remarkTextarea = document.getElementById('approval-remark-input');
+    var reqMark = document.getElementById('approval-remark-req');
+    var hintEl = document.getElementById('approval-remark-hint');
+    var errorEl = document.getElementById('approval-remark-error');
+    if (!form || !valueInput || !remarkTextarea) return;
+
+    var originalValue = parseFloat(form.dataset.originalValue);
+
+    function valueAdjusted() {
+        var v = parseFloat(valueInput.value);
+        if (isNaN(v) || isNaN(originalValue)) return false;
+        return Math.abs(v - originalValue) > 0.001;
+    }
+
+    function clearError() {
+        if (errorEl) { errorEl.style.display = 'none'; errorEl.textContent = ''; }
+        remarkTextarea.style.borderColor = '';
+    }
+
+    function refreshHint() {
+        var adjusted = valueAdjusted();
+        if (reqMark) reqMark.style.display = adjusted ? '' : 'none';
+        if (hintEl) hintEl.textContent = adjusted ? '(required - value adjusted)' : '(required if rejecting or adjusting the value)';
+        clearError();
+    }
+    valueInput.addEventListener('input', refreshHint);
+    remarkTextarea.addEventListener('input', clearError);
+    refreshHint();
+
+    // A native alert()/confirm() dialog isn't guaranteed to actually render
+    // in every environment this page can be opened in (some embedded/kiosk
+    // webviews silently suppress it) - blocking the submit still works
+    // either way (the function still returns false), but the approver would
+    // see nothing telling them why nothing happened. An inline message next
+    // to the field itself doesn't depend on that dialog subsystem at all.
+    window.aapApprovalGateSubmit = function (_btn, action) {
+        var remark = remarkTextarea.value.trim();
+        var needsRemark = action === 'reject' || valueAdjusted();
+        if (needsRemark && remark === '') {
+            var message = action === 'reject'
+                ? 'Report Description is required when rejecting a case.'
+                : 'Report Description is required when adjusting the Approved Value.';
+            if (errorEl) { errorEl.textContent = message; errorEl.style.display = 'block'; }
+            remarkTextarea.style.borderColor = '#dc3545';
+            remarkTextarea.focus();
+            remarkTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            return false;
+        }
+        clearError();
+        return confirm(action === 'reject' ? 'Reject this case?' : 'Approve this case?');
+    };
+});
+
 document.addEventListener('DOMContentLoaded', function () {
     var remarkInput = document.getElementById('approval-remark-input');
     var statusEl = document.getElementById('approval-remark-status');
@@ -54,19 +117,58 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     }
 
+    var executeReveal = document.getElementById('execute-reveal-btn');
+    var executeDefault = document.getElementById('execute-actions-default');
+    var executeConfirm = document.getElementById('execute-actions-confirm');
+    var executeCancel = document.getElementById('execute-cancel-btn');
+    if (executeReveal) {
+        executeReveal.addEventListener('click', function () {
+            executeDefault.style.display = 'none';
+            executeConfirm.style.display = 'flex';
+        });
+    }
+    if (executeCancel) {
+        executeCancel.addEventListener('click', function () {
+            executeConfirm.style.display = 'none';
+            executeDefault.style.display = 'flex';
+        });
+    }
+
+    var executeForm = document.getElementById('execute-form');
     var suspendToggle = document.getElementById('suspend-case-toggle');
     var suspendForm = document.getElementById('suspend-case-form');
     var suspendCancel = document.getElementById('suspend-case-cancel');
     if (suspendToggle) {
         suspendToggle.addEventListener('click', function () {
-            suspendToggle.style.display = 'none';
+            if (executeForm) executeForm.style.display = 'none';
             suspendForm.style.display = 'block';
         });
     }
     if (suspendCancel) {
         suspendCancel.addEventListener('click', function () {
             suspendForm.style.display = 'none';
-            suspendToggle.style.display = 'inline-flex';
+            if (executeForm) executeForm.style.display = 'block';
+        });
+    }
+
+    // Approval gate's own Suspend Case - same reveal/cancel pattern as
+    // Execution's above, distinct element ids since both can exist on the
+    // page's history at once (Approval's card stays visible even once the
+    // case has moved on to Execution).
+    var approvalGateForm = document.getElementById('approval-gate-form');
+    var approvalSuspendToggle = document.getElementById('approval-suspend-toggle');
+    var approvalSuspendForm = document.getElementById('approval-suspend-form');
+    var approvalSuspendCancel = document.getElementById('approval-suspend-cancel');
+    if (approvalSuspendToggle) {
+        approvalSuspendToggle.addEventListener('click', function () {
+            if (approvalGateForm) approvalGateForm.style.display = 'none';
+            approvalSuspendForm.style.display = 'block';
+        });
+    }
+    if (approvalSuspendCancel) {
+        approvalSuspendCancel.addEventListener('click', function () {
+            approvalSuspendForm.style.display = 'none';
+            if (approvalGateForm) approvalGateForm.style.display = 'block';
         });
     }
 });
@@ -180,13 +282,21 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     }
 
-    // Warn before an accidental refresh/close/navigate discards unsaved edits
-    // - no auto-save, since silently writing partial edits without an
-    // explicit Save click isn't appropriate here. Cleared on any actual
-    // submit (case-edit, per-note edit, attachment delete, etc.) since that's
-    // an intentional save, not an accidental loss.
+});
+
+// Warn before an accidental refresh/close/navigate discards unsaved edits -
+// no auto-save, since silently writing partial edits without an explicit
+// Save/Confirm click isn't appropriate here. Cleared on any actual submit
+// (case-edit, per-note edit, Approve/Reject/Suspend/Execute, attachment
+// delete, etc.) since that's an intentional save, not an accidental loss.
+// Deliberately its own top-level listener, not nested inside the one above -
+// that one bails out early whenever the Case Summary edit UI isn't rendered
+// at all (case moved past editable stages), which is exactly when the
+// Approval/Execution/Suspend gates' own free-text fields (remarks, reasons)
+// are what's actually at risk of being lost to a refresh.
+document.addEventListener('DOMContentLoaded', function () {
     var formDirty = false;
-    document.querySelectorAll('#case-edit input, #case-edit select, #case-edit textarea, [form="case-edit"], .note-edit-form input, .note-edit-form textarea').forEach(function (el) {
+    document.querySelectorAll('input, textarea, select').forEach(function (el) {
         el.addEventListener('input', function () { formDirty = true; });
         el.addEventListener('change', function () { formDirty = true; });
     });
@@ -197,7 +307,6 @@ document.addEventListener('DOMContentLoaded', function () {
             e.returnValue = '';
         }
     });
-
 });
 
 // Edit/delete controls on individual notes and attachments are now rendered

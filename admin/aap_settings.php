@@ -54,20 +54,27 @@ if (isset($_GET['action']) && $_GET['action'] === 'list_aap_superadmin' && $_SER
     $per_page = max(5, min(100, (int)($_GET['per_page'] ?? 30)));
     $offset = ($page - 1) * $per_page;
     $name_filter = trim($_GET['name_filter'] ?? '');
-    $name_sql = $name_filter !== '' ? " AND nama_staff LIKE '" . $conn->real_escape_string($name_filter) . "%'" : '';
-    // With no name search, only show current AAP admins (a roster, not the
-    // full staff directory) - a name search reaches every staff member so a
-    // brand-new admin can still be found and promoted.
-    $admin_only_sql = $name_filter === '' ? ' AND aap != 0' : '';
+    $name_sql = $name_filter !== '' ? " AND nama_staff LIKE '%" . $conn->real_escape_string($name_filter) . "%'" : '';
+    // With no name search, only show current full Admins (aap = 1) - a
+    // roster, not the full staff directory. Department Managers (aap = 2)
+    // are deliberately excluded here and managed on their own page
+    // (admin/aap_department_managers.php) instead - this panel is Admin-only.
+    // A name search reaches every staff member so a brand-new admin can
+    // still be found and promoted.
+    $admin_only_sql = $name_filter === '' ? ' AND aap = 1' : '';
+    // Department Managers (aap = 2) never show here, even via name search -
+    // this panel is Admin-only end to end; manage them on their own page
+    // (admin/aap_department_managers.php) instead.
+    $exclude_managers_sql = ' AND aap != 2';
 
-    $count_res = $conn->query("SELECT COUNT(*) c FROM staff WHERE recycle != 1 $name_sql $admin_only_sql");
+    $count_res = $conn->query("SELECT COUNT(*) c FROM staff WHERE recycle != 1 $name_sql $admin_only_sql $exclude_managers_sql");
     $total = $count_res ? (int)$count_res->fetch_assoc()['c'] : 0;
 
     $res = $conn->query("
         SELECT s.id, s.nama_staff, s.aap, sd.depart_name
         FROM staff s
         LEFT JOIN staff_department sd ON sd.id = s.department
-        WHERE s.recycle != 1 $name_sql $admin_only_sql
+        WHERE s.recycle != 1 $name_sql $admin_only_sql $exclude_managers_sql
         ORDER BY s.nama_staff ASC
         LIMIT $per_page OFFSET $offset
     ");
@@ -95,12 +102,13 @@ if (isset($_POST['action']) && $_POST['action'] === 'update_aap_superadmin' && $
     ob_end_clean();
     header('Content-Type: application/json');
     $target_id = (int)($_POST['staff_id'] ?? 0);
-    // staff.aap is just a flag now: 0 = no access, 1 = full AAP admin access
-    // (see aapFetchAapLevel()/aapFetchIsSuperAdmin() in aap_lib.php - the old
-    // two-tier "Admin 1"/"Admin 2 (SuperAdmin)" split was removed since
-    // there was never a real reason to hold anything back from Admin 1).
-    // Anything else posted collapses to 0 rather than left as whatever
-    // garbage came in.
+    // staff.aap: 0 = no access, 1 = full AAP admin access (see
+    // aapFetchAapLevel()/aapFetchIsSuperAdmin() in aap_lib.php). This panel
+    // is Admin-only end to end and never writes 2 (Department Manager,
+    // scoped to their own staff.department department(s) only via
+    // aapFetchDeptManagerDepartmentIds()) - that's set from its own page
+    // (admin/aap_department_managers.php) instead. Anything else posted
+    // collapses to 0 rather than left as whatever garbage came in.
     $aap_val = (int)($_POST['aap'] ?? 0);
     if (!in_array($aap_val, [0, 1], true)) $aap_val = 0;
 
@@ -108,9 +116,14 @@ if (isset($_POST['action']) && $_POST['action'] === 'update_aap_superadmin' && $
         echo json_encode(['success' => false, 'message' => 'Invalid staff.']);
         exit;
     }
-    $check = $conn->query("SELECT id FROM staff WHERE id = $target_id AND recycle != 1");
-    if (!$check || $check->num_rows === 0) {
+    $check = $conn->query("SELECT id, aap FROM staff WHERE id = $target_id AND recycle != 1");
+    $check_row = $check ? $check->fetch_assoc() : null;
+    if (!$check_row) {
         echo json_encode(['success' => false, 'message' => 'Staff not found.']);
+        exit;
+    }
+    if ((int)$check_row['aap'] === 2) {
+        echo json_encode(['success' => false, 'message' => 'This staff member is a Department Manager - manage that from the Department Managers page instead.']);
         exit;
     }
     if ($conn->query("UPDATE staff SET aap = $aap_val WHERE id = $target_id AND recycle != 1")) {

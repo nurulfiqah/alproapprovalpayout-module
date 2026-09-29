@@ -67,7 +67,7 @@ function aapIsCustomerSupport($dept_ids) {
     return in_array(AAP_DEPT_CUSTOMER_SUPPORT, $dept_ids, true);
 }
 
-// $is_superadmin is the union of staff.aap/okr/atem (see
+// $is_superadmin is the union of staff.aap==1/okr/atem (see
 // aapFetchIsSuperAdmin) - an admin flagged in any one of the three modules
 // gets full admin access in all of them, mirroring how OKR and ATEM already
 // union each other's flag. $aap_level is the raw staff.aap value
@@ -75,8 +75,11 @@ function aapIsCustomerSupport($dept_ids) {
 // distinguish "has staff.aap = 1" from "is admin via grade/department/OKR/
 // ATEM instead", which matters wherever that distinction is checked
 // directly (e.g. aap_staff_assignments.php's Audit Trail visibility).
+// Deliberately checks === 1, not >= 1: staff.aap = 2 is Department Manager
+// (aapFetchDeptManagerDepartmentIds() below), a narrower, department-scoped
+// role, not full admin - it must never satisfy this check.
 function aapIsAdmin($grade, $dept_ids, $is_superadmin = false, $aap_level = 0) {
-    return ((int)$grade >= 4) || in_array(AAP_DEPT_DIGITAL_INNOVATION, $dept_ids, true) || $is_superadmin || (int)$aap_level >= 1;
+    return ((int)$grade >= 4) || in_array(AAP_DEPT_DIGITAL_INNOVATION, $dept_ids, true) || $is_superadmin || (int)$aap_level === 1;
 }
 
 // Whether this staff member manages Case Types / Approval Unit settings for
@@ -107,41 +110,39 @@ function aapDeptInScope($department_id, $dept_ids, $can_manage_all) {
     return $can_manage_all || in_array((int)$department_id, $dept_ids, true);
 }
 
-// aap_department_managers - a per-department allowlist granting specific
-// staff access to manage that department's Case Types (admin/aap_admin.php),
-// Approval Unit Groups (admin/aap_grouping_master.php - their own
-// department's Groups only, never the shared Universal list), and Staff
-// Assignments lookups (admin/aap_staff_assignments.php). Deliberately
-// ungated by grade or staff.department - being on this list is enough by
-// itself, the same way fixit_department's Person Incharge names someone for
-// a department without checking their grade. Always ADDITIVE: callers merge
-// this into their own $dept_ids after computing $aap_can_manage_all_depts
-// from the real grade/department signals, never before - a grant here must
-// never be mistaken for company-wide "manage all departments" access just
-// because one of the granted departments happens to be the one
-// aapCanManageAllDepartments() otherwise keys off (Customer Support).
+// Department Managers = staff with staff.aap = 2, managing their OWN
+// department(s) (staff.department). staff.aap has three levels now: 0 = no
+// access, 1 = full admin (aapFetchIsSuperAdmin()/aapIsAdmin() below), 2 =
+// Department Manager - scoped to their own department, never full admin.
+// Set via admin/aap_department_managers.php's own Grant Access panel, not
+// admin/aap_settings.php (which deliberately excludes level 2 entirely).
+// Being a manager is enough by itself to manage that department's Case
+// Types (admin/aap_admin.php), Approval Unit Groups
+// (admin/aap_grouping_master.php - their own department's Groups only, never
+// the shared Universal list), Staff Assignments lookups
+// (admin/aap_staff_assignments.php) and to view admin/aap_department_managers.php.
+// Always ADDITIVE: callers merge this into their own $dept_ids after computing
+// $aap_can_manage_all_depts from the real grade/department signals, never
+// before - being a manager must never be mistaken for company-wide "manage
+// all departments" access.
 function aapFetchDeptManagerDepartmentIds($conn, $staff_id) {
     if (empty($staff_id)) return [];
-    $stmt = $conn->prepare("SELECT department_id FROM aap_department_managers WHERE staff_id = ?");
+    $stmt = $conn->prepare("SELECT department FROM staff WHERE id = ? AND aap = 2 AND recycle != 1");
     $stmt->bind_param("i", $staff_id);
     $stmt->execute();
-    $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $row = $stmt->get_result()->fetch_assoc();
     $stmt->close();
-    return array_map(function ($r) { return (int)$r['department_id']; }, $rows);
+    return $row ? aapDeptIdsFromCsv($row['department']) : [];
 }
 
 // Re-queried independently at every entry point rather than cached in
 // session, same convention as OKR's $_is_superadmin / ATEM's
 // $db_is_superadmin.
-// staff.aap only has one real admin level now (1 = full access to every AAP
-// admin page/feature - Case Types, Approval Units, Staff Assignments,
-// Department Managers, granting staff.aap itself, nothing hidden or
-// blocked). The old two-tier "Admin 1" (general)/"Admin 2" (SuperAdmin)
-// split was removed since there was never an actual reason to hold anything
-// back from Admin 1 - any staff.aap value >= 1 now counts as full
-// SuperAdmin-equivalent access for AAP's own purposes. staff.okr/staff.atem
-// stay in this same union so a SuperAdmin from either sibling module still
-// gets full AAP access too, same as before.
+// staff.aap = 1 is the only level that counts as full admin here - 2 is
+// Department Manager (aapFetchDeptManagerDepartmentIds() above), a
+// department-scoped role that must NOT get full admin access just because
+// the column is non-zero. staff.okr/staff.atem stay in this same union so a
+// SuperAdmin from either sibling module still gets full AAP access too.
 function aapFetchIsSuperAdmin($conn, $staff_id) {
     if (empty($staff_id)) return false;
     $stmt = $conn->prepare("SELECT aap, okr, atem FROM staff WHERE id = ?");
@@ -150,16 +151,18 @@ function aapFetchIsSuperAdmin($conn, $staff_id) {
     $row = $stmt->get_result()->fetch_assoc();
     $stmt->close();
     if (!$row) return false;
-    return (int)$row['aap'] >= 1 || (int)$row['okr'] === 1 || (int)$row['atem'] === 1;
+    return (int)$row['aap'] === 1 || (int)$row['okr'] === 1 || (int)$row['atem'] === 1;
 }
 
-// The raw staff.aap level (0 or 1 - see aapFetchIsSuperAdmin() above for why
-// there's no level 2 anymore) - needed wherever "has AAP admin access at
-// all" (level 1) must be distinguished from "no access" (level 0), which a
-// plain is-SuperAdmin boolean can't express on its own (a grade>=4/Digital
-// Innovation/OKR-or-ATEM-SuperAdmin account is_superadmin=true without ever
-// having a staff.aap row value). Passed into aapIsAdmin() below as its own
-// OR path, same weight as grade>=4/Digital Innovation/SuperAdmin.
+// The raw staff.aap level (0 = no access, 1 = full admin, 2 = Department
+// Manager - see aapFetchIsSuperAdmin()/aapFetchDeptManagerDepartmentIds()
+// above) - needed wherever "has full AAP admin access" (level 1
+// specifically) must be distinguished from "no access"/"Department Manager
+// only", which a plain is-SuperAdmin boolean can't express on its own (a
+// grade>=4/Digital Innovation/OKR-or-ATEM-SuperAdmin account is_superadmin=
+// true without ever having a staff.aap row value). Passed into aapIsAdmin()
+// below as its own OR path, same weight as grade>=4/Digital Innovation/
+// SuperAdmin - but only when it's exactly 1.
 function aapFetchAapLevel($conn, $staff_id) {
     if (empty($staff_id)) return 0;
     $stmt = $conn->prepare("SELECT aap FROM staff WHERE id = ?");
@@ -388,6 +391,11 @@ function aapFetchGroupStaffTiers($conn, $department_id, $group_id) {
 // rows in one section always share the same department_id - the Staff Tier
 // picker only ever adds one Group (one department) per level - so the first
 // row's value stands in for the whole section.
+//
+// HOD Approval Only mode (aap_case_types.level2_hod_only/level3_hod_only)
+// has no aap_case_type_staff_tiers rows at all - the department is stored
+// directly on the case type instead (.._hod_department_id) - so that's
+// checked first before falling back to the tier-row lookup.
 function aapCaseTypeSectionDepartment($conn, $case_type_id, $section) {
     if (!$case_type_id) return null;
     $stmt = $conn->prepare("SELECT department_id FROM aap_case_type_staff_tiers WHERE case_type_id = ? AND section = ? LIMIT 1");
@@ -396,6 +404,24 @@ function aapCaseTypeSectionDepartment($conn, $case_type_id, $section) {
     $row = $stmt->get_result()->fetch_assoc();
     $stmt->close();
     return $row ? (int)$row['department_id'] : null;
+}
+
+// Staff currently holding Head of Department for a department, per Alpro's
+// existing HOD registry (iidas_department - not owned by AAP, kept live
+// here rather than copied so an HOD change there takes effect immediately).
+// A department can have more than one active row (co-heads/backups) -
+// every one of them qualifies. recycle=1 rows are retired HODs, excluded.
+function aapFetchDepartmentHodStaffIds($conn, $department_id) {
+    $department_id = (int)$department_id;
+    if ($department_id <= 0) return [];
+    $stmt = $conn->prepare("SELECT DISTINCT hod_id FROM iidas_department WHERE department = ? AND recycle = 0");
+    $stmt->bind_param("i", $department_id);
+    $stmt->execute();
+    $ids = [];
+    $res = $stmt->get_result();
+    while ($row = $res->fetch_assoc()) { $ids[] = (int)$row['hod_id']; }
+    $stmt->close();
+    return $ids;
 }
 
 // Per-Case-Type edit rights, split by section - each is independently
@@ -486,12 +512,32 @@ function aapFetchCaseTypeStaffTiers($conn, $case_type_id, $section) {
 // are not on the Exclusion list (Level 3) - exclusion always wins regardless
 // of tier. Admins bypass both lists.
 //
+// HOD Approval Only overrides all of the above for whichever level has it
+// set: the sole eligible approver(s) become the CURRENT case's own
+// requester_department_id's HOD(s) (iidas_department) - resolved fresh per
+// case, not a department fixed on the Case Type, so the same Case Type can
+// route to a different HOD for each case depending on who actually raised
+// it (e.g. a "Customer Refund" Case Type owned by Operation at Level 1
+// still routes to Customer Support's HOD for a case Customer Support
+// raised) - covers every value from 0 to Unlimited, and the Staff Tier
+// roster for that level is irrelevant while this is on. Level 3 (still
+// 'exclusion') is checked first and wins over Level 2 if both happen to be
+// set, matching "exclusion always wins" above.
+//
 // Customer Support is a deliberate exception (not handled in here): CS staff
 // raise and self-handle their own cases at any value, so callers should
 // check that case first (requester is CS and is the acting staff member)
 // before ever calling this function - see aap_update.php.
-function aapCanApprove($conn, $staff_id, $case_type_id, $value, $is_admin) {
+function aapCanApprove($conn, $staff_id, $case_type_id, $value, $is_admin, $requester_department_id = null) {
     if ($is_admin) return true;
+
+    $ct = aapFetchCaseType($conn, $case_type_id);
+    if ($ct && !empty($ct['level3_hod_only'])) {
+        return in_array((int)$staff_id, aapFetchDepartmentHodStaffIds($conn, $requester_department_id), true);
+    }
+    if ($ct && !empty($ct['level2_hod_only'])) {
+        return in_array((int)$staff_id, aapFetchDepartmentHodStaffIds($conn, $requester_department_id), true);
+    }
 
     $stmt = $conn->prepare("SELECT 1 FROM aap_case_type_staff_tiers WHERE case_type_id = ? AND section = 'exclusion' AND staff_id = ?");
     $stmt->bind_param("ii", $case_type_id, $staff_id);
@@ -539,6 +585,15 @@ function aapGenerateCaseRef($id) {
 }
 
 function aapLogAudit($conn, $case_id, $event, $actor_id, $summary, $changes = null) {
+    // aap_audit_logs.summary is varchar(255) - several call sites append a
+    // free-text remark/reason the user typed (unbounded length) onto a short
+    // fixed prefix, so a long remark can overflow the column and crash the
+    // whole request. The remark itself is already stored in full elsewhere
+    // (e.g. aap_cases.approval_remark) - this is just a log line - so
+    // truncate here rather than fixing every call site individually.
+    if (mb_strlen($summary) > 255) {
+        $summary = mb_substr($summary, 0, 252) . '...';
+    }
     $stmt = $conn->prepare("INSERT INTO aap_audit_logs (case_id, event, actor_staff_id, summary, changes, timestamp) VALUES (?, ?, ?, ?, ?, ?)");
     $changes_json = $changes !== null ? json_encode($changes) : null;
     $now = date('Y-m-d H:i:s');
@@ -615,8 +670,20 @@ function aapNotifyStaff($conn, $case_id, $recipient_staff_id, $type) {
 // open_case/tag_physical handlers in aap_update.php). Admins are excluded on
 // purpose - there's no fixed "admin pool" to enumerate, and admins already
 // see every case regardless of notifications.
-function aapFetchEligibleApproverIds($conn, $case_type_id, $value) {
+function aapFetchEligibleApproverIds($conn, $case_type_id, $value, $requester_department_id = null) {
     $value = (float)$value;
+
+    // HOD Approval Only (see aapCanApprove() above) - the eligible approver
+    // set IS this specific case's requester_department_id's HOD(s), full
+    // stop, no tier/exclusion roster involved.
+    $ct = aapFetchCaseType($conn, $case_type_id);
+    if ($ct && !empty($ct['level3_hod_only'])) {
+        return aapFetchDepartmentHodStaffIds($conn, $requester_department_id);
+    }
+    if ($ct && !empty($ct['level2_hod_only'])) {
+        return aapFetchDepartmentHodStaffIds($conn, $requester_department_id);
+    }
+
     $approval = aapFetchCaseTypeStaffTiers($conn, $case_type_id, 'approval');
     $excluded_ids = array_column(aapFetchCaseTypeStaffTiers($conn, $case_type_id, 'exclusion'), 'staff_id');
 
@@ -1234,31 +1301,19 @@ function aapCaseDisplayStatus($case) {
     // one "Rejected" status everywhere, even though case_status itself keeps
     // them distinct internally (different actor/trigger, see $can_void).
     if ($cs === 'voided' || $cs === 'rejected') return ['label' => 'Rejected', 'slug' => 'rejected'];
-    // A case that was ever suspended (see aap_update.php's 'suspend_case'
-    // action) keeps that flagged permanently once it finally closes, even
-    // though suspend_count itself doesn't affect anything else about the
-    // closed case - it's just a heads-up that this one didn't go straight
-    // through on its first pass.
-    if ($cs === 'closed') {
-        if ((int)($case['suspend_count'] ?? 0) > 0) return ['label' => 'Closed (Suspended)', 'slug' => 'closed_suspended'];
-        return ['label' => 'Closed', 'slug' => 'closed'];
-    }
+    if ($cs === 'closed') return ['label' => 'Closed', 'slug' => 'closed'];
     // Execute and Close are separate steps/actions - 'executed' means the
     // case has been executed but is still waiting on the separate "Notify
     // Requester & Close Case" step (aap_update.php's 'close' action), not
     // finished yet, so it gets its own status rather than folding into
     // 'Closed'.
-    if ($cs === 'executed') return ['label' => 'Closing', 'slug' => 'closing'];
+    if ($cs === 'executed') return ['label' => 'Closing in Progress', 'slug' => 'closing'];
 
     // $cs === 'open' from here on.
     if ((int)$case['physical_confirm_required'] === 1 && in_array($case['physical_confirm_status'], ['pending', 'tagged'], true)) {
         return ['label' => 'Verification', 'slug' => 'confirming'];
     }
     if (in_array($case['approval_status'], ['approved', 'corrected'], true) && $case['execution_status'] === 'pending') {
-        // Flags a case that was ever suspended, same idea as the Closed
-        // (Suspended) status - just a heads-up for whoever's about to
-        // execute that this one already went through a Suspend/redo cycle.
-        if ((int)($case['suspend_count'] ?? 0) > 0) return ['label' => 'Execute (Suspended)', 'slug' => 'executing_suspended'];
         return ['label' => 'Execute', 'slug' => 'executing'];
     }
     return ['label' => 'Approval', 'slug' => 'pending_approval'];
@@ -1411,7 +1466,7 @@ function aapUploadFailureNote($upload_result) {
 // rather than reordering everything.
 function aapCaseExportCsvHeader() {
     return [
-        'Case Ref', 'Fixit Ref', 'Case Type', 'Department/Outlet', 'Verification Required', 'Approval', 'Status', 'Raised', 'Closed',
+        'Case Ref', 'Fixit Ref', 'Case Type', 'Department/Outlet', 'Verification Reference', 'Approval', 'Status', 'Raised', 'Closed',
         'Fixit Report', 'Fixit Report Description', 'Fixit Category', 'Fixit Outlet', 'Fixit Lodged By',
         'Calculated Value (Requestor)', 'Approved Value', 'Value Type',
         'Bank Name', 'Bank Account Number', 'Bank Account Holder Name',

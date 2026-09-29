@@ -131,4 +131,19 @@
 
     refresh();
     setInterval(refresh, POLL_MS);
+
+    // ---- Fix the outer app's chat-notification icon on admin/ pages ----
+    // lock_adv.php (shared outer-app file, not part of this module - can't
+    // be edited here) renders that icon with a relative src
+    // ('../../odb/common/img/noti.png') that only resolves correctly when
+    // the current page is exactly two folders below the web root, which is
+    // true for aap/*.php but not for aap/admin/*.php (three folders deep) -
+    // the browser ends up requesting a doubled, nonexistent .../odb/odb/...
+    // path there, so the icon just shows as broken. Corrected client-side
+    // to an absolute path instead, which resolves the same regardless of
+    // how deep the current page sits.
+    var chatNotifIcon = document.querySelector('input[type="image"][alt="text"]');
+    if (chatNotifIcon) {
+        chatNotifIcon.src = '/odb/common/img/noti.png';
+    }
 })();

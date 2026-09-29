@@ -16,9 +16,6 @@ $aap_dept_ids = $aap_identity['dept_ids'];
 $aap_is_admin = $aap_identity['is_admin'];
 $aap_is_superadmin = $aap_identity['is_superadmin'];
 $aap_is_operations = aapIsOperations($aap_dept_ids);
-// Export & Close is the same authority as the single-case Execute/Close
-// flow (aap_update.php) - Level 3/execution only, not every admin/creator.
-$aap_can_execute = aapCanExecute($grade, $aap_dept_ids, $aap_is_admin);
 if ((int)$grade < 1 && !$aap_is_admin) {
     die("You do not have access to this module.");
 }
@@ -210,39 +207,6 @@ $active_tab = (isset($_GET['tab']) && $_GET['tab'] === 'incoming' && $aap_can_se
 
 <p class="aap-module-tag"><i class="bi bi-shield-check"></i> AAP — Alpro Approval Protocol</p>
 
-<div class="aap-stats">
-    <?php if ($aap_can_see_incoming): ?>
-    <div class="aap-stat red">
-        <h3>Incoming from Fixit</h3>
-        <div class="value"><?php echo number_format(count($incoming_fixit)); ?></div>
-    </div>
-    <?php endif; ?>
-    <div class="aap-stat" style="border-top-color:#b8860b;">
-        <h3>Open Cases</h3>
-        <div class="value"><?php echo number_format($stats['draft'] + $stats['open']); ?></div>
-    </div>
-    <div class="aap-stat" style="border-top-color:#f39c12;">
-        <h3>Verification</h3>
-        <div class="value"><?php echo number_format($stats['pending_physical']); ?></div>
-    </div>
-    <div class="aap-stat" style="border-top-color:#fd7e14;">
-        <h3>Approval</h3>
-        <div class="value"><?php echo number_format($stats['pending_approval']); ?></div>
-    </div>
-    <div class="aap-stat" style="border-top-color:#0dcaf0;">
-        <h3>Execute</h3>
-        <div class="value"><?php echo number_format($stats['pending_execution']); ?></div>
-    </div>
-    <div class="aap-stat" style="border-top-color:#20c997;">
-        <h3>Closing</h3>
-        <div class="value"><?php echo number_format($stats['pending_close']); ?></div>
-    </div>
-    <div class="aap-stat" style="border-top-color:#6c757d;">
-        <h3>Closed</h3>
-        <div class="value"><?php echo number_format($stats['closed_today']); ?></div>
-    </div>
-</div>
-
 <div class="aap-card" style="padding: 0;">
     <div class="aap-tabs" style="padding: 6px 20px 0; border-bottom-color: #e9ecef;">
         <button type="button" class="aap-tab-btn <?php echo $active_tab === 'queue' ? 'active' : ''; ?>" data-tab="queue">Case Queue <span class="aap-tab-count"><?php echo number_format($total_rows); ?></span></button>
@@ -265,7 +229,7 @@ $active_tab = (isset($_GET['tab']) && $_GET['tab'] === 'incoming' && $aap_can_se
                             'confirming' => 'Verification',
                             'pending_approval' => 'Approval',
                             'executing' => 'Execute',
-                            'closing' => 'Closing',
+                            'closing' => 'Closing in Progress',
                             'rejected' => 'Rejected',
                             'closed' => 'Closed',
                         ] as $k => $v): ?>
@@ -292,7 +256,7 @@ $active_tab = (isset($_GET['tab']) && $_GET['tab'] === 'incoming' && $aap_can_se
                     </select>
                 </div>
                 <div class="alpro-field">
-                    <label>Verification Required</label>
+                    <label>Verification Reference</label>
                     <select class="alpro-input" name="physical_confirm_status">
                         <option value="">All</option>
                         <option value="required" <?php echo ($f_physical === 'required') ? 'selected' : ''; ?>>Required</option>
@@ -327,20 +291,44 @@ $active_tab = (isset($_GET['tab']) && $_GET['tab'] === 'incoming' && $aap_can_se
             </div>
         </form>
 
+        <div class="aap-stats" style="margin-top:18px;">
+            <div class="aap-stat">
+                <h3>Open Cases</h3>
+                <div class="value" style="color:#b8860b;"><?php echo number_format($stats['draft'] + $stats['open']); ?></div>
+            </div>
+            <div class="aap-stat">
+                <h3>Verification</h3>
+                <div class="value" style="color:#f39c12;"><?php echo number_format($stats['pending_physical']); ?></div>
+            </div>
+            <div class="aap-stat">
+                <h3>Approval</h3>
+                <div class="value" style="color:#fd7e14;"><?php echo number_format($stats['pending_approval']); ?></div>
+            </div>
+            <div class="aap-stat">
+                <h3>Execute</h3>
+                <div class="value" style="color:#0dcaf0;"><?php echo number_format($stats['pending_execution']); ?></div>
+            </div>
+            <div class="aap-stat">
+                <h3>Closing in Progress</h3>
+                <div class="value" style="color:#20c997;"><?php echo number_format($stats['pending_close']); ?></div>
+            </div>
+            <div class="aap-stat">
+                <h3>Closed</h3>
+                <div class="value" style="color:#6c757d;"><?php echo number_format($stats['closed_today']); ?></div>
+            </div>
+        </div>
+
         <div style="border-top: 1px solid #e9ecef; margin: 18px 0 0; padding-top: 18px;">
         <form method="post" action="aap_export_cases.php" target="_blank" id="export-form">
         <div style="display:flex; justify-content:flex-end; gap:8px; margin-bottom:10px;">
-            <?php if ($aap_can_execute): ?>
-            <button type="submit" formaction="aap_export_close_cases.php" class="alpro-btn alpro-btn-grey" id="export-close-btn" disabled onclick="return confirm('Close every selected case that has finished Execution, then export? Cases not yet executed are skipped and reported in the CSV, not closed. This cannot be undone.');"><i class="bi bi-check2-all"></i> Export &amp; Close</button>
-            <?php endif; ?>
-            <button type="submit" class="alpro-btn alpro-btn-grey" id="export-selected-btn" disabled><i class="bi bi-download"></i> Export Selected</button>
+            <button type="submit" class="alpro-btn alpro-btn-grey" id="export-selected-btn" disabled><i class="bi bi-download"></i> Export</button>
         </div>
         <table class="alpro-table" width="100%">
             <tr>
                 <th style="width:32px;"><input type="checkbox" id="export-select-all"></th>
                 <th>Case Ref</th>
                 <th>Case Type</th>
-                <th style="text-align:center;">Verification Required</th>
+                <th style="text-align:center;">Verification Reference</th>
                 <th>Approval</th>
                 <th>Status</th>
                 <th><?php echo aapSortHeaderLink('timestamp', 'Raised', $f_sort, $f_dir); ?></th>

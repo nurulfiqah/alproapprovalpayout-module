@@ -34,7 +34,7 @@ $aap_can_see_dept_manager_pages_nav = $aap_is_superadmin_nav || !empty($aap_mana
 <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css" rel="stylesheet">
 <link href="<?php echo $aap_base; ?>css/aap-sidebar.css?v=<?php echo time(); ?>" rel="stylesheet">
 
-<div class="alpro-box" style="margin-bottom: 20px; text-align: left; background: #fff; overflow: visible;">
+<div class="alpro-box aap-topnav" style="margin-bottom: 20px; text-align: left; background: #fff; overflow: visible;">
     <div class="alpro-actions" style="margin-bottom: 0px; display: flex; align-items: center; flex-wrap: wrap; gap: 5px; overflow: visible;">
         <strong style="margin-right: 15px; color: #2c3e50; font-size: 16px;">Alpro Approval Protocol (AAP)</strong>
 

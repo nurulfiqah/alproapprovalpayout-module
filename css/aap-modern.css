@@ -6,7 +6,7 @@
 .aap-modern { text-align: left; margin-top: 15px; }
 
 /* Horizontal step progress tracker — shows where a case sits in the SOP
-   (Raised -> Verification Required -> Approval -> Execution -> Closed). */
+   (Raised -> Verification Reference -> Approval -> Execution -> Closed). */
 .aap-stepper { display: flex; align-items: flex-start; margin-bottom: 0; }
 .aap-step { flex: 1; position: relative; text-align: center; }
 .aap-step::before {
@@ -53,7 +53,7 @@
 .aap-pill-rejected { background: #dc3545; }
 .aap-pill-voided { background: #adb5bd; }
 .aap-pill-pending { background: #fd7e14; }
-.aap-pill-approved { background: #198754; }
+.aap-pill-approved { background: transparent; color: #198754; }
 .aap-pill-corrected { background: #6610f2; }
 .aap-pill-executive { background: #0d6efd; }
 .aap-pill-manager { background: #6610f2; }
@@ -156,6 +156,21 @@
 }
 .aap-info-icon:hover .aap-tooltip { visibility: visible; opacity: 1; }
 
+/* True CSS-grid replacement for a stack of .alpro-grid rows where the field
+   count differs row to row (e.g. Department+Case Type, then Customer
+   Name+Membership ID+Transaction No) - with flex, a 2-item row and a 3-item
+   row each divide the same width differently (50/50 vs 33/33/33), so their
+   column edges never line up and the card reads as misaligned/cluttered.
+   A shared 3-column grid template fixes that: every row uses the same
+   column tracks, and a field spans 1-3 of them via .aap-span-2/.aap-span-3
+   (or an inline grid-column) so mismatched field counts still land on the
+   same vertical lines. Scoped to .aap-modern. */
+.aap-modern .aap-form-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px 24px; }
+.aap-modern .aap-form-grid + .aap-form-grid { margin-top: 14px; }
+.aap-modern .aap-form-grid .alpro-field { min-width: 0; }
+.aap-modern .aap-form-grid .aap-span-2 { grid-column: span 2; }
+.aap-modern .aap-form-grid .aap-span-3 { grid-column: 1 / -1; }
+
 /* Activity / audit timeline (mirrors OKR's .okr-activity-*) */
 .aap-activity-list { max-height: 320px; overflow-y: auto; }
 .aap-activity-row { border-left: 3px solid #dee2e6; padding: 4px 0 4px 12px; margin-bottom: 10px; text-align: left; }
@@ -173,11 +188,14 @@
 
 /* ===================== index.php ===================== */
 .aap-module-tag { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; font-size: 12px; font-weight: 700; color: #0d6efd; text-transform: uppercase; letter-spacing: .04em; }
-.aap-stats { display: flex; gap: 16px; margin: 14px 0 20px; flex-wrap: wrap; }
-.aap-stat { background: #fff; padding: 16px 18px; border-radius: 8px; flex: 1; min-width: 160px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border-top: 4px solid #3498db; }
-.aap-stat h3 { margin: 0 0 8px; color: #7f8c8d; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
-.aap-stat .value { font-size: 24px; font-weight: bold; color: #2c3e50; }
-.aap-stat.red { border-top-color: #e74c3c; }
+/* Matches the ATEM dashboard's own stat-tile look (atem/css/style.css's
+   .atem-card/.atem-card-title/.atem-stat-value) - plain white card with a
+   neutral border, a title with its own underline divider, and a large bold
+   number that carries the color instead of a colored top-border strip. */
+.aap-stats { display: flex; gap: 12px; margin: 14px 0 20px; flex-wrap: wrap; }
+.aap-stat { background: #fff; padding: 12px 14px; border-radius: 8px; flex: 1; min-width: 130px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); border: 1px solid #e9ecef; }
+.aap-stat h3 { margin: 0 0 6px; padding-bottom: 6px; color: #212529; font-size: 12.5px; font-weight: 600; text-transform: none; letter-spacing: normal; border-bottom: 1px solid #e9ecef; }
+.aap-stat .value { padding-top: 4px; font-size: 1.4rem; font-weight: 700; line-height: 1.1; color: #2c3e50; }
 
 .aap-tabs { display: flex; gap: 6px; border-bottom: 2px solid #e5e9ec; margin-bottom: 0; }
 .aap-tab-btn {
@@ -195,7 +213,13 @@
 .aap-tab-panel { display: none; }
 .aap-tab-panel.active { display: block; }
 
-.aap-filter-compact .alpro-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 6px 10px; }
+/* display:flex (not grid) so the fields always stretch to fill the row's
+   full width - grid's repeat(auto-fit, minmax(...)) reserves as many
+   140px+ columns as the container is wide, and with fewer fields than
+   columns the extra columns just sit empty instead of the fields
+   stretching, leaving a large dead gap before the Filter/Reset buttons. */
+.aap-filter-compact .alpro-grid { display: flex; flex-wrap: wrap; gap: 6px 10px; }
+.aap-filter-compact .alpro-grid .alpro-field { flex: 1 1 160px; min-width: 160px; }
 .aap-filter-compact .alpro-field label { font-size: 9px; margin-bottom: 2px; }
 .aap-filter-compact .alpro-input { padding: 3px 6px; font-size: 11px; height: auto; min-height: 0; line-height: 1.2; }
 .aap-filter-compact select.alpro-input {
@@ -206,7 +230,10 @@
     line-height: 1.2 !important;
 }
 .aap-filter-compact .alpro-btn { padding: 3px 10px; font-size: 11px; }
-.aap-filter-compact .alpro-actions { flex-wrap: nowrap; justify-self: end; margin-left: auto; }
+/* flex-basis:100% forces this onto its own line below the fields (a flex
+   item wider than the remaining space on the current row wraps to a new
+   one) instead of squeezing in next to the last field and cramping it. */
+.aap-filter-compact .alpro-actions { flex: 1 1 100%; flex-wrap: nowrap; justify-content: flex-end; margin-top: 4px; }
 .aap-filter-compact .alpro-actions .alpro-btn { flex: 0 0 auto; white-space: nowrap; }
 
 /* ===================== aap_add.php ===================== */
@@ -324,3 +351,33 @@
 .aap-access-note { background: #fff6e5; color: #8a5a00; border: 1px solid #ffe0a3; border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-bottom: 20px; }
 table.aap-access-table th, table.aap-access-table td { vertical-align: top; }
 table.aap-access-table code { background: #f1f3f5; padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+
+/* ===================== Standardized action-button pair =====================
+   One shared look for every "two-choice decision" row in the module -
+   Approve/Reject, Execute/Suspend Case, Confirm Suspend/Cancel, Confirm
+   Reject/Cancel, Confirm Void/Cancel, etc. Before this, every one of these
+   pairs hand-rolled its own inline padding/font-size/colors, which is how
+   they quietly drifted out of sync with each other (different sizes,
+   Reject/Suspend sometimes solid-fill and sometimes outline). Put
+   `.aap-actions-row` on the wrapping .alpro-actions and `.aap-btn-action`
+   plus exactly one tone modifier on each button instead of repeating the
+   raw styles - a page's own tone choice is still its own, but the sizing/
+   shape now always matches everywhere it's used.
+   Usage:
+     <div class="alpro-actions aap-actions-row">
+       <button class="alpro-btn aap-btn-action aap-btn-action-primary">Approve</button>
+       <button class="alpro-btn aap-btn-action aap-btn-action-danger">Reject</button>
+     </div>
+*/
+.aap-actions-row { flex-direction: row; flex-wrap: wrap; gap: 4px; }
+/* Compound selectors (.alpro-btn.aap-btn-action-*) rather than the tone
+   class alone - the shared framework's own .alpro-btn rule (grey fill) has
+   the same specificity as a lone .aap-btn-action-primary, so whichever
+   stylesheet happens to load second wins the tie and silently greys these
+   out. Pairing with .alpro-btn outranks that regardless of load order. */
+.alpro-btn.aap-btn-action { flex: 1; min-width: 0; padding: 4px 10px; font-size: 12px; line-height: 1.4; }
+.alpro-btn.aap-btn-action-primary { background: #0d6efd; color: #fff; border: none; }
+.alpro-btn.aap-btn-action-danger { background: #fff; color: #dc3545; border: 1px solid #dc3545; }
+.alpro-btn.aap-btn-action-danger-solid { background: #dc3545; color: #fff; border: none; }
+.alpro-btn.aap-btn-action-neutral { background: #fff; color: #212529; border: 1px solid #000; }
+.alpro-btn.aap-btn-action-outline-primary { background: #fff; color: #0d6efd; border: 1px solid #0d6efd; }

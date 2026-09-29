@@ -1,7 +1,4 @@
 <?php
-// Buffers everything so the AJAX action branches below can discard the HTML
-// lock_adv.php echoes before its redirect check runs and emit clean JSON
-// instead - same trick used in aap_settings.php.
 ob_start();
 require_once('../../lock_adv.php');
 $connect = 1;
@@ -12,26 +9,6 @@ if (!isset($conn) || !($conn instanceof mysqli)) {
 }
 require_once('../aap_lib.php');
 
-// GRANTING/REVOKING access itself is AAP-admin-only - same as
-// aap_settings.php (grants staff.aap) - a Department Manager must not be
-// able to hand themselves or anyone else that same access, or extend it to
-// another department (every mutation endpoint below re-checks
-// $aap_is_superadmin independently). VIEWING the page is relaxed further
-// down: a Department Manager can open it to see the grants list for their
-// own department(s), just with the "Grant Access" form and Remove buttons
-// hidden - see $aap_manager_dept_ids/$can_view_page below.
-$aap_identity = aapResolveIdentity($conn, $id_user, $grade, $department);
-$grade = $aap_identity['grade'];
-$department = $aap_identity['department'];
-$aap_dept_ids = $aap_identity['dept_ids'];
-$aap_is_admin = $aap_identity['is_admin'];
-$aap_is_superadmin = $aap_identity['is_superadmin'];
-$aap_manager_dept_ids = aapFetchDeptManagerDepartmentIds($conn, $id_user);
-$can_view_page = $aap_is_superadmin || !empty($aap_manager_dept_ids);
-if (!$can_view_page) {
-    die("You don't have access to this page. Ask an admin to grant you AAP admin access, or Department Manager access for a specific department.");
-}
-
 // PHP's default session handler locks the session file for the whole
 // request - this page is hit repeatedly via AJAX below and never writes to
 // $_SESSION itself, so releasing the lock here lets those requests (and
@@ -41,102 +18,122 @@ if (session_status() === PHP_SESSION_ACTIVE) {
     session_write_close();
 }
 
-// ---- AJAX: every active staff member belonging to one department (via
-// staff.department, comma-separated) - populates the Grant Access Staff
-// dropdown below with that department's actual roster. Admin-only, same as
-// the mutation endpoints below - a Department Manager can view the page now
-// but the Grant Access form itself (and everything that feeds it) stays
-// off-limits to them. ----
+// ---- AJAX: every active staff member belonging to one department - feeds
+// the Grant Access panel's Staff dropdown below. Admin-only (staff.aap = 1),
+// same as the mutation endpoint further down - a Department Manager can view
+// the page but never this panel or what feeds it. ----
 if (isset($_GET['action']) && $_GET['action'] === 'get_dept_staff' && $_SERVER['REQUEST_METHOD'] === 'GET') {
     ob_end_clean();
     header('Content-Type: application/json');
-    if (!$aap_is_superadmin) {
-        echo json_encode(['success' => false, 'message' => 'Admin access only.']);
-        exit;
+    // Wrapped so a stray warning/notice or a thrown mysqli exception (this
+    // codebase runs with MYSQLI_REPORT_STRICT elsewhere) can never leak raw
+    // PHP output/HTML into what the browser expects to be pure JSON - that
+    // corrupts response.json() client-side into an opaque "Failed to load"
+    // with no way to tell what actually went wrong. A real error now comes
+    // back as a JSON message instead.
+    try {
+        $identity = aapResolveIdentity($conn, $id_user, $grade, $department);
+        if (!$identity['is_superadmin']) {
+            echo json_encode(['success' => false, 'message' => 'Admin access only.']);
+            exit;
+        }
+        $dept_id = (int)($_GET['department_id'] ?? 0);
+        if ($dept_id <= 0) {
+            echo json_encode(['success' => false, 'message' => 'Invalid department.']);
+            exit;
+        }
+        $stmt = $conn->prepare("SELECT id, nama_staff, aap FROM staff WHERE recycle != 1 AND FIND_IN_SET(?, department) ORDER BY nama_staff ASC");
+        $stmt->bind_param("i", $dept_id);
+        $stmt->execute();
+        $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+        $stmt->close();
+        $staff = array_map(function ($r) {
+            return ['id' => (int)$r['id'], 'nama_staff' => $r['nama_staff'], 'aap' => (int)$r['aap']];
+        }, $rows);
+        echo json_encode(['success' => true, 'staff' => $staff]);
+    } catch (\Throwable $e) {
+        echo json_encode(['success' => false, 'message' => 'Server error: ' . $e->getMessage()]);
     }
-    $dept_id = (int)($_GET['department_id'] ?? 0);
-    if ($dept_id <= 0) {
-        echo json_encode(['success' => false, 'message' => 'Invalid department.']);
-        exit;
-    }
-    $stmt = $conn->prepare("
-        SELECT s.id, s.nama_staff
-        FROM staff s
-        WHERE s.recycle != 1 AND FIND_IN_SET(?, s.department)
-        ORDER BY s.nama_staff ASC
-    ");
-    $stmt->bind_param("i", $dept_id);
-    $stmt->execute();
-    $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
-    $stmt->close();
-    $staff = array_map(function ($r) {
-        return ['id' => (int)$r['id'], 'nama_staff' => $r['nama_staff']];
-    }, $rows);
-    echo json_encode(['success' => true, 'staff' => $staff]);
     exit;
 }
 
-// ---- AJAX: grant one staff member Department Manager access for one
-// department. ----
-if (isset($_POST['action']) && $_POST['action'] === 'add_manager' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+// ---- AJAX: set/revoke a staff member's Department Manager access
+// (staff.aap = 2). Never touches staff.aap = 1 (full admin) - a target
+// already at level 1 is rejected rather than silently demoted, since that
+// would be a much bigger, unintended change to make from this panel. ----
+if (isset($_POST['action']) && $_POST['action'] === 'set_department_manager' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     ob_end_clean();
     header('Content-Type: application/json');
-    if (!$aap_is_superadmin) {
+    $identity = aapResolveIdentity($conn, $id_user, $grade, $department);
+    if (!$identity['is_superadmin']) {
         echo json_encode(['success' => false, 'message' => 'Admin access only.']);
         exit;
     }
-    $dept_id = (int)($_POST['department_id'] ?? 0);
     $staff_id = (int)($_POST['staff_id'] ?? 0);
-    if ($dept_id <= 0 || $staff_id <= 0) {
-        echo json_encode(['success' => false, 'message' => 'Invalid department or staff.']);
+    $make_manager = !empty($_POST['make_manager']);
+    if ($staff_id <= 0) {
+        echo json_encode(['success' => false, 'message' => 'Invalid staff.']);
         exit;
     }
-    $staff_check = $conn->query("SELECT id FROM staff WHERE id = $staff_id");
-    if (!$staff_check || $staff_check->num_rows === 0) {
+    $check = $conn->query("SELECT aap, nama_staff FROM staff WHERE id = $staff_id AND recycle != 1");
+    $row = $check ? $check->fetch_assoc() : null;
+    if (!$row) {
         echo json_encode(['success' => false, 'message' => 'Staff not found.']);
         exit;
     }
-    $now = date('Y-m-d H:i:s');
-    $stmt = $conn->prepare("INSERT IGNORE INTO aap_department_managers (department_id, staff_id, created_by, timestamp) VALUES (?, ?, ?, ?)");
-    $stmt->bind_param("iiis", $dept_id, $staff_id, $id_user, $now);
-    $ok = $stmt->execute();
-    $stmt->close();
-    echo json_encode(['success' => $ok, 'message' => $ok ? 'Added.' : $conn->error]);
+    if ((int)$row['aap'] === 1) {
+        echo json_encode(['success' => false, 'message' => $row['nama_staff'] . ' is already a full Admin - change that from AAP Access instead.']);
+        exit;
+    }
+    $new_val = $make_manager ? 2 : 0;
+    if ($conn->query("UPDATE staff SET aap = $new_val WHERE id = $staff_id AND recycle != 1")) {
+        echo json_encode(['success' => true, 'message' => $make_manager ? 'Set as Department Manager.' : 'Removed.']);
+    } else {
+        echo json_encode(['success' => false, 'message' => 'Update failed.']);
+    }
     exit;
 }
 
-// ---- AJAX: revoke one Department Manager grant. ----
-if (isset($_POST['action']) && $_POST['action'] === 'remove_manager' && $_SERVER['REQUEST_METHOD'] === 'POST') {
-    ob_end_clean();
-    header('Content-Type: application/json');
-    if (!$aap_is_superadmin) {
-        echo json_encode(['success' => false, 'message' => 'Admin access only.']);
-        exit;
-    }
-    $id = (int)($_POST['id'] ?? 0);
-    if ($id <= 0) {
-        echo json_encode(['success' => false, 'message' => 'Invalid entry.']);
-        exit;
-    }
-    $conn->query("DELETE FROM aap_department_managers WHERE id = " . $id);
-    echo json_encode(['success' => true, 'message' => 'Removed.']);
-    exit;
+// Who counts as a Department Manager is decided by staff.aap = 2 (see
+// aapFetchDeptManagerDepartmentIds() in aap_lib.php) - settable from the
+// Grant Access panel below (admin-only), or from admin/aap_settings.php's
+// AAP Access panel (same underlying column, either page works). A full AAP
+// admin or a Department Manager (for their own department(s)) can view this
+// page; only a full admin sees the Grant Access panel itself.
+$aap_identity = aapResolveIdentity($conn, $id_user, $grade, $department);
+$grade = $aap_identity['grade'];
+$department = $aap_identity['department'];
+$aap_dept_ids = $aap_identity['dept_ids'];
+$aap_is_admin = $aap_identity['is_admin'];
+$aap_is_superadmin = $aap_identity['is_superadmin'];
+$aap_manager_dept_ids = aapFetchDeptManagerDepartmentIds($conn, $id_user);
+$can_view_page = $aap_is_superadmin || !empty($aap_manager_dept_ids);
+if (!$can_view_page) {
+    die("You don't have access to this page. This page is for AAP admins and Department Managers.");
 }
 
-$departments = aapFetchDepartments($conn);
-// A Department Manager only ever sees the grants for their own granted
-// department(s) here - not the full company-wide roster a real admin gets.
-$managers_scope_sql = $aap_is_superadmin ? '' : (
-    empty($aap_manager_dept_ids) ? ' AND 1=0' : ' AND m.department_id IN (' . implode(',', array_map('intval', $aap_manager_dept_ids)) . ')'
-);
-$managers = $conn->query("
-    SELECT m.id, m.department_id, m.staff_id, m.timestamp, sd.depart_name, s.nama_staff, s.recycle AS staff_resigned, s.email, s.hp
-    FROM aap_department_managers m
-    LEFT JOIN staff_department sd ON sd.id = m.department_id
-    LEFT JOIN staff s ON s.id = m.staff_id
-    WHERE 1=1 $managers_scope_sql
-    ORDER BY sd.depart_name ASC, s.nama_staff ASC
+// Department Managers are no longer granted here - they're simply every
+// staff member with staff.aap = 2, each managing their own staff.department
+// department(s) (see aapFetchDeptManagerDepartmentIds() in aap_lib.php).
+// This page just lists them, one row per (department, staff). A full AAP
+// admin sees every department; a Department Manager only sees the managers
+// sharing their own department(s).
+$dept_names = array_column(aapFetchDepartments($conn), 'depart_name', 'id');
+$fixit_admins = $conn->query("
+    SELECT id, nama_staff, department, email, hp
+    FROM staff
+    WHERE aap = 2 AND recycle != 1
+    ORDER BY nama_staff ASC
 ")->fetch_all(MYSQLI_ASSOC);
+$managers_by_dept = [];
+foreach ($fixit_admins as $fa) {
+    foreach (aapDeptIdsFromCsv($fa['department']) as $dept_id) {
+        if (!$aap_is_superadmin && !in_array($dept_id, $aap_manager_dept_ids, true)) continue;
+        $managers_by_dept[$dept_id]['name'] = $dept_names[$dept_id] ?? '';
+        $managers_by_dept[$dept_id]['rows'][] = $fa;
+    }
+}
+uasort($managers_by_dept, function ($x, $y) { return strcasecmp($x['name'], $y['name']); });
 $aap_base = '../';
 ?>
 
@@ -156,35 +153,33 @@ $aap_base = '../';
     <h2 class="aap-page-title"><i class="bi bi-person-badge"></i> Department Managers</h2>
 </div>
 
-<div class="aap-access-note" style="background:#e6f6ed; color:#146c37; border-color:#b7e4c7;">
-    Grants a specific staff member access to manage one department's Case Types, Approval Unit Groups, and Staff Assignments lookups in AAP - independent of their grade or <code>staff.department</code>. Additive only: it never removes access someone already has through the normal grade/department-based rules, and it never touches the shared Universal tier list (Approval Unit Master), only that department's own Groups.
-</div>
 
 <div class="aap-bento">
     <?php if ($aap_is_superadmin): ?>
     <div class="aap-bento-item aap-span-12">
         <div class="aap-card">
             <h6 class="aap-card-title"><i class="bi bi-plus-lg"></i> Grant Access</h6>
-            <div class="alpro-grid">
-                <div class="alpro-field">
+            <p class="aap-card-hint" style="margin-top:6px;">Sets a staff member's AAP Access to Department Manager (staff.aap = 2) - same field as Admin → AAP Access. They'll manage every department already in their own staff record.</p>
+            <div style="display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap;">
+                <div class="alpro-field" style="flex:0 0 220px;">
                     <label>Department</label>
                     <select class="alpro-input" id="dm-department">
                         <option value="">Select Department</option>
-                        <?php foreach ($departments as $d): ?>
+                        <?php foreach (aapFetchDepartments($conn) as $d): ?>
                             <option value="<?php echo (int)$d['id']; ?>"><?php echo htmlspecialchars($d['depart_name']); ?></option>
                         <?php endforeach; ?>
                     </select>
                 </div>
-                <div class="alpro-field">
+                <div class="alpro-field" style="flex:1; min-width:200px;">
                     <label>Staff</label>
                     <select class="alpro-input" id="dm-staff-select" disabled>
                         <option value="">Select Department first</option>
                     </select>
                 </div>
+                <button class="alpro-btn alpro-btn-blue" type="button" id="dm-add-btn" style="flex:0 0 auto; padding:8px 20px; font-size:14px; border-radius:8px; white-space:nowrap;">Set as Department Manager</button>
             </div>
-            <div class="alpro-actions alpro-mt-10" style="justify-content:flex-end;">
-                <span id="dm-add-msg" style="font-size:12px; margin-right:8px;"></span>
-                <button class="alpro-btn alpro-btn-blue" type="button" id="dm-add-btn" style="flex:0 0 auto; padding:8px 20px; font-size:14px; border-radius:8px;">Grant Access</button>
+            <div style="text-align:right; margin-top:6px;">
+                <span id="dm-add-msg" style="font-size:12px;"></span>
             </div>
         </div>
     </div>
@@ -192,35 +187,23 @@ $aap_base = '../';
 
     <div class="aap-bento-item aap-span-12">
         <div class="aap-card">
-            <h6 class="aap-card-title"><i class="bi bi-list-check"></i> Current Grants</h6>
+            <h6 class="aap-card-title"><i class="bi bi-list-check"></i> Current Department Managers</h6>
+            <p class="aap-card-hint" style="margin-top:6px;">Every staff member with AAP Access set to Department Manager (staff.aap = 2) manages their own department's Case Types, Approval Units and Staff Assignments here.</p>
             <table class="alpro-table aap-ct-list-table" width="100%">
-                <thead><tr><th>Department</th><th>Staff</th><th>Email</th><th>Phone</th><th>Granted</th><?php if ($aap_is_superadmin): ?><th>Action</th><?php endif; ?></tr></thead>
+                <thead><tr><th>Department</th><th>Staff</th><th>Email</th><th>Phone</th><?php if ($aap_is_superadmin): ?><th>Action</th><?php endif; ?></tr></thead>
                 <tbody id="dm-list-tbody">
-                    <?php if (empty($managers)): ?>
-                    <tr><td colspan="<?php echo $aap_is_superadmin ? 6 : 5; ?>" class="alpro-muted" style="text-align:center;">No Department Managers granted yet.</td></tr>
+                    <?php if (empty($managers_by_dept)): ?>
+                    <tr><td colspan="<?php echo $aap_is_superadmin ? 5 : 4; ?>" class="alpro-muted" style="text-align:center;">No Department Managers found.</td></tr>
                     <?php else: ?>
-                    <?php
-                    // $managers is already ordered by depart_name then
-                    // nama_staff, so same-department rows are already
-                    // adjacent - group them here so the Department cell only
-                    // needs to appear once per department (rowspan) instead
-                    // of repeating on every staff row.
-                    $managers_by_dept = [];
-                    foreach ($managers as $m) {
-                        $managers_by_dept[$m['department_id']]['name'] = $m['depart_name'];
-                        $managers_by_dept[$m['department_id']]['rows'][] = $m;
-                    }
-                    ?>
                     <?php foreach ($managers_by_dept as $group): ?>
                         <?php foreach ($group['rows'] as $i => $m): ?>
                         <tr data-id="<?php echo (int)$m['id']; ?>">
                             <?php if ($i === 0): ?>
                             <td rowspan="<?php echo count($group['rows']); ?>" style="vertical-align:top;"><?php echo htmlspecialchars($group['name'] ?: '—'); ?></td>
                             <?php endif; ?>
-                            <td><?php echo htmlspecialchars($m['nama_staff'] ?: '—'); ?><?php if (!empty($m['staff_resigned'])): ?> <span class="alpro-badge alpro-badge-voided">Resigned</span><?php endif; ?></td>
+                            <td><?php echo htmlspecialchars($m['nama_staff'] ?: '—'); ?></td>
                             <td><?php echo htmlspecialchars($m['email'] ?: '—'); ?></td>
                             <td><?php echo htmlspecialchars($m['hp'] ?: '—'); ?></td>
-                            <td><?php echo htmlspecialchars(date('d-m-Y H:i', strtotime($m['timestamp']))); ?></td>
                             <?php if ($aap_is_superadmin): ?>
                             <td><button type="button" class="alpro-btn alpro-btn-grey dm-remove-btn" style="padding:2px 10px; font-size:12px;">Remove</button></td>
                             <?php endif; ?>
@@ -235,4 +218,4 @@ $aap_base = '../';
 </div>
 </div>
 
-<?php $page_js = '../js/aap_department_managers.js'; include('../aap_footer.php'); ?>
+<?php $page_js = $aap_is_superadmin ? '../js/aap_department_managers.js' : ''; include('../aap_footer.php'); ?>

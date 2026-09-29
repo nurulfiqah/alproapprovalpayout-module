@@ -143,7 +143,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
         var lines = [];
         if (opt.dataset.desc) lines.push(opt.dataset.desc);
-        if (opt.dataset.physical === '1') lines.push('<strong>Verification required</strong> before this case can reach the approval gate.');
+        if (opt.dataset.physical === '1') lines.push('<strong>Verification Reference</strong> before this case can reach the approval gate.');
         lines.push('Approved by the staff assigned to this Case Type\'s approval gate.');
 
         info.innerHTML = lines.join('<br>');

@@ -46,8 +46,32 @@ document.addEventListener('DOMContentLoaded', function () {
         // Description is what an admin actually set it up for (e.g.
         // "Academy Moodle"), so show both: "Group 1: Academy Moodle".
         // Falls back to just the name if no Description has been set yet.
+        //
+        // permissionLocked captures whatever this select's `disabled` state
+        // was rendered as server-side (aap_admin.php's $edit_rights gate) -
+        // preserved across every re-render below rather than letting the
+        // single-option auto-select path (which also sets `disabled`)
+        // accidentally re-enable a select the current editor isn't entitled
+        // to touch at all.
+        var permissionLocked = groupSelect ? groupSelect.disabled : false;
         function renderGroupOptions(groups) {
             if (!groupSelect) return;
+            // Exactly one real choice (typically "Default (Universal)" when
+            // the department has no custom Groups set up) - a dropdown that
+            // only ever resolves to the same option makes the admin click
+            // through it for nothing, so skip the picker: show that one
+            // option fixed and disabled, and load its roster automatically
+            // instead of waiting for a "change" event that never comes.
+            if (groups.length === 1) {
+                var only = groups[0];
+                var onlyLabel = only.description ? (only.group_name + ': ' + only.description) : only.group_name;
+                groupSelect.innerHTML = '<option value="' + only.id + '">' + esc(onlyLabel) + '</option>';
+                groupSelect.value = String(only.id);
+                groupSelect.disabled = true;
+                applyGroupSelection();
+                return;
+            }
+            groupSelect.disabled = permissionLocked;
             groupSelect.innerHTML = '<option value="">Select Group</option>' + groups.map(function (g) {
                 var label = g.description ? (g.group_name + ': ' + g.description) : g.group_name;
                 return '<option value="' + g.id + '">' + esc(label) + '</option>';
@@ -141,19 +165,24 @@ document.addEventListener('DOMContentLoaded', function () {
         }
 
         // Picking a Group fully replaces the table - it's this level's only
-        // Group, not one of several being accumulated.
-        if (groupSelect) {
-            groupSelect.addEventListener('change', function () {
-                var groupId = groupSelect.value;
-                var deptId = deptSelect.value;
-                tierTbody.innerHTML = '';
-                if (!groupId || !deptId) return;
-                fetchGroupStaffTiers(deptId, groupId).then(function (staff) {
-                    staff.forEach(function (st) {
-                        addRow(st.staff_id, st.staff_name, deptId, st.tier, st.group_id);
-                    });
+        // Group, not one of several being accumulated. Named (not inline)
+        // since renderGroupOptions() above also calls this directly when
+        // there's only one Group to auto-select - a real "change" event
+        // never fires for that case since nothing changed by user action.
+        function applyGroupSelection() {
+            if (!groupSelect) return;
+            var groupId = groupSelect.value;
+            var deptId = deptSelect.value;
+            tierTbody.innerHTML = '';
+            if (!groupId || !deptId) return;
+            fetchGroupStaffTiers(deptId, groupId).then(function (staff) {
+                staff.forEach(function (st) {
+                    addRow(st.staff_id, st.staff_name, deptId, st.tier, st.group_id);
                 });
             });
+        }
+        if (groupSelect) {
+            groupSelect.addEventListener('change', applyGroupSelection);
         }
         // Clearing/changing the Department invalidates whatever Group was
         // picked under the previous one - clear the table so it can't
@@ -188,6 +217,31 @@ document.addEventListener('DOMContentLoaded', function () {
 
     var approvalTier = initStaffTier({ dept: 'ct_pool_department', group: 'ct_pool_group', tbody: 'ct_staff_tier_tbody', currentGroupId: firstGroupId(AAP_ADMIN.approvalTiers) });
     var exclusionTier = initStaffTier({ dept: 'ct_pool_department_lvl3', group: 'ct_pool_group_lvl3', tbody: 'ct_staff_tier_tbody_lvl3', currentGroupId: firstGroupId(AAP_ADMIN.exclusionTiers) });
+
+    // HOD Approval Only has no department to pick at all any more - it's
+    // resolved per case (the HOD of whoever raised that specific case), not
+    // fixed on the Case Type - so the whole Department+Group row and Staff
+    // Tier table hide while checked (irrelevant in HOD mode - the save
+    // handler ignores whatever's in them either way, see
+    // aapSaveCaseTypeHodOnly() in admin/aap_admin.php), replaced by a plain
+    // explanatory note.
+    function wireHodOnlyToggle(checkboxId, rowId, noteId, tableWrapId) {
+        var checkbox = document.getElementById(checkboxId);
+        var row = document.getElementById(rowId);
+        var note = document.getElementById(noteId);
+        var tableWrap = document.getElementById(tableWrapId);
+        if (!checkbox) return;
+        function apply() {
+            var on = checkbox.checked;
+            if (row) row.style.display = on ? 'none' : 'flex';
+            if (note) note.style.display = on ? 'block' : 'none';
+            if (tableWrap) tableWrap.hidden = on;
+        }
+        checkbox.addEventListener('change', apply);
+        apply();
+    }
+    wireHodOnlyToggle('ct_level2_hod_only', 'ct_deptgroup_row', 'ct_hod_note', 'ct_staff_tier_wrap');
+    wireHodOnlyToggle('ct_level3_hod_only', 'ct_deptgroup_row_lvl3', 'ct_hod_note_lvl3', 'ct_staff_tier_wrap_lvl3');
 
     // Editing an existing Case Type - prefill both tables from what's already
     // saved (AAP_ADMIN.approvalTiers/exclusionTiers, from aap_admin.php).
@@ -224,7 +278,7 @@ document.addEventListener('DOMContentLoaded', function () {
             }
             if (!exclusionRows.length) {
                 e.preventDefault();
-                alert('At least one Group must be added under Level 3 - Approval Exclusion Assign.');
+                alert('At least one Group must be added under Level 3 - Approval Executed Assign.');
                 return;
             }
         });

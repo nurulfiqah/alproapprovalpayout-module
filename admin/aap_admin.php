@@ -134,8 +134,14 @@ function aapGroupLabel($conn, $group_id) {
 // "Department (Group label)" for a section's first row - all rows in one
 // section always share the same department_id/group_id (only one Group per
 // level), so the first row stands in for the whole section. '—' when the
-// section has nobody assigned yet.
-function aapCaseTypeSectionLabel($conn, $tiers, $dept_names) {
+// section has nobody assigned yet. HOD Approval Only has no Staff Tier rows
+// at all (see aapSaveCaseTypeHodOnly() above) and no department stored
+// either (resolved per case at approval time - see aapCanApprove() in
+// aap_lib.php) - $hod_only covers that case instead of falling through to '—'.
+function aapCaseTypeSectionLabel($conn, $tiers, $dept_names, $hod_only = false) {
+    if ($hod_only) {
+        return 'HOD Only (per case - whoever raised it)';
+    }
     if (empty($tiers)) return '—';
     $dept_name = $dept_names[$tiers[0]['department_id']] ?? '—';
     return $dept_name . ' (' . aapGroupLabel($conn, $tiers[0]['group_id']) . ')';
@@ -220,6 +226,26 @@ function aapSaveCaseTypeStaffTierSection($conn, $case_type_id, $section, $json, 
     return null;
 }
 
+// Persists one level's "HOD Approval Only" tick (see aap_lib.php's
+// aapCanApprove()/aapFetchEligibleApproverIds()) - gated on the same
+// $can_reassign right as the Department/Group picker itself (both are
+// disabled together in the form), so a submitter without it can never flip
+// this on/off; their submission is silently ignored here and whatever was
+// already stored wins. No department is stored for this any more - HOD mode
+// resolves the department fresh per case (whoever raised it), not one fixed
+// on the Case Type. Returns whether the level ends up HOD-only after this
+// save, so the caller knows whether to also touch the Staff Tier roster for
+// that section.
+function aapSaveCaseTypeHodOnly($conn, $case_type_id, $level, $posted_only, $can_reassign, $existing_only) {
+    $final_only = $can_reassign ? (int)$posted_only : (int)$existing_only;
+    $col_only = "level{$level}_hod_only";
+    $stmt = $conn->prepare("UPDATE aap_case_types SET $col_only = ? WHERE id = ?");
+    $stmt->bind_param("ii", $final_only, $case_type_id);
+    $stmt->execute();
+    $stmt->close();
+    return (bool)$final_only;
+}
+
 // ---- Case Type save (add or update) ----
 if (isset($_POST['save_case_type'])) {
     $ctid = (int)$_POST['case_type_id'];
@@ -273,17 +299,37 @@ if (isset($_POST['save_case_type'])) {
                 $stmt->close();
             }
 
-            $err = aapSaveCaseTypeStaffTierSection(
-                $conn, $target_ctid, 'approval', $_POST['approval_tiers_json'] ?? '',
-                $rights['level2_dept'], $rights['can_reassign_level2'], $rights['can_edit_level2_group'],
-                $aap_dept_ids, $aap_can_manage_all_depts, $id_user, $now, 'Level 2 - Approval Mode Assign'
+            $level2_is_hod = aapSaveCaseTypeHodOnly(
+                $conn, $target_ctid, 2,
+                isset($_POST['level2_hod_only']), $rights['can_reassign_level2'], $existing_ct['level2_hod_only'] ?? 0
             );
-            if ($err === null) {
+            $level3_is_hod = aapSaveCaseTypeHodOnly(
+                $conn, $target_ctid, 3,
+                isset($_POST['level3_hod_only']), $rights['can_reassign_level3'], $existing_ct['level3_hod_only'] ?? 0
+            );
+
+            $err = null;
+            if ($level2_is_hod) {
+                // No Staff Tier roster while HOD-only - clear any leftover
+                // rows from before it was turned on so nothing stale lingers.
+                $conn->query("DELETE FROM aap_case_type_staff_tiers WHERE case_type_id = " . (int)$target_ctid . " AND section = 'approval'");
+            } else {
                 $err = aapSaveCaseTypeStaffTierSection(
-                    $conn, $target_ctid, 'exclusion', $_POST['exclusion_tiers_json'] ?? '',
-                    $rights['level3_dept'], $rights['can_reassign_level3'], $rights['can_edit_level3_group'],
-                    $aap_dept_ids, $aap_can_manage_all_depts, $id_user, $now, 'Level 3 - Approval Exclusion Assign'
+                    $conn, $target_ctid, 'approval', $_POST['approval_tiers_json'] ?? '',
+                    $rights['level2_dept'], $rights['can_reassign_level2'], $rights['can_edit_level2_group'],
+                    $aap_dept_ids, $aap_can_manage_all_depts, $id_user, $now, 'Level 2 - Approval Mode Assign'
                 );
+            }
+            if ($err === null) {
+                if ($level3_is_hod) {
+                    $conn->query("DELETE FROM aap_case_type_staff_tiers WHERE case_type_id = " . (int)$target_ctid . " AND section = 'exclusion'");
+                } else {
+                    $err = aapSaveCaseTypeStaffTierSection(
+                        $conn, $target_ctid, 'exclusion', $_POST['exclusion_tiers_json'] ?? '',
+                        $rights['level3_dept'], $rights['can_reassign_level3'], $rights['can_edit_level3_group'],
+                        $aap_dept_ids, $aap_can_manage_all_depts, $id_user, $now, 'Level 3 - Approval Executed Assign'
+                    );
+                }
             }
 
             if ($err !== null) {
@@ -434,7 +480,7 @@ $aap_base = '../';
                     pick anyway (new Case Type, or editing their own) - no
                     real choice to make, so just show it. -->
                     <div class="alpro-input" style="background:#f1f3f5; display:flex; align-items:center;"><?php echo htmlspecialchars($level1_departments[0]['depart_name']); ?></div>
-                    <input type="hidden" name="department_id_ct" value="<?php echo (int)$level1_departments[0]['id']; ?>">
+                    <input type="hidden" name="department_id_ct" id="ct-level1-department" value="<?php echo (int)$level1_departments[0]['id']; ?>">
                 <?php elseif (!$edit_rights['can_edit_level1']): ?>
                     <!-- Editing via Level 2/3-only access - show the Case
                     Type's ACTUAL department (looked up against the full,
@@ -443,9 +489,9 @@ $aap_base = '../';
                     whose options are filtered to the editor's own
                     department(s) and so would never actually contain it. -->
                     <div class="alpro-input" style="background:#f1f3f5; display:flex; align-items:center;"><?php echo htmlspecialchars($dept_names_all[$edit_case_type['department_id']] ?? '—'); ?></div>
-                    <input type="hidden" name="department_id_ct" value="<?php echo (int)($edit_case_type['department_id'] ?? 0); ?>">
+                    <input type="hidden" name="department_id_ct" id="ct-level1-department" value="<?php echo (int)($edit_case_type['department_id'] ?? 0); ?>">
                 <?php else: ?>
-                    <select class="alpro-input" name="department_id_ct" required>
+                    <select class="alpro-input" name="department_id_ct" id="ct-level1-department" required>
                         <option value="">Select Department</option>
                         <?php foreach ($level1_departments as $dept): ?>
                             <option value="<?php echo $dept['id']; ?>" <?php echo (isset($edit_case_type['department_id']) && $edit_case_type['department_id'] == $dept['id']) ? 'selected' : ''; ?>><?php echo htmlspecialchars($dept['depart_name']); ?></option>
@@ -454,7 +500,7 @@ $aap_base = '../';
                 <?php endif; ?>
             </div>
             <div class="aap-ct-field">
-                <label>Verification Required
+                <label>Verification Reference
                     <span class="aap-admin-info-icon">i<span class="aap-admin-tooltip">When checked, a case raised under this Case Type must have the returned item tagged and confirmed at ACMM before it can reach the approval gate. Leave unchecked for cases with no physical item to return (e.g. points/credit adjustments).</span></span>
                 </label>
                 <div class="aap-ct-field-inline">
@@ -478,7 +524,12 @@ $aap_base = '../';
         <div class="aap-ct-level aap-ct-level-2">
             <div class="aap-ct-field" style="grid-column: 1 / -1;">
                 <label>Staff Tier <span style="color:red;">*</span></label>
-                <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
+                <div class="aap-ct-field-inline" style="margin-bottom:8px;">
+                    <input type="checkbox" name="level2_hod_only" id="ct_level2_hod_only" value="1" <?php echo !empty($edit_case_type['level2_hod_only']) ? 'checked' : ''; ?> <?php echo $edit_rights['can_reassign_level2'] ? '' : 'disabled'; ?>>
+                    <label for="ct_level2_hod_only" style="display:inline; font-weight:normal;">HOD Approval Only <span class="aap-admin-info-icon">i<span class="aap-admin-tooltip">The Head of Department (from Alpro's HOD list) of whichever department actually raised the case becomes the sole approver for this level, for any value from 0 to Unlimited - resolved per case, not fixed here, so the same Case Type can route to a different HOD depending on who raised it. The Department/Group/Staff Tier roster below is ignored while this is checked.</span></span></label>
+                </div>
+                <div id="ct_hod_note" style="display:none; padding:8px 12px; background:#f1f3f5; border-radius:6px; font-size:13px; color:#495057; margin-bottom:8px;">Approver is resolved per case (the HOD of whoever raised it) - no department to pick here.</div>
+                <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;" id="ct_deptgroup_row">
                     <select class="alpro-input" name="department_id_ct_lvl2" id="ct_pool_department" style="flex:1;" <?php echo $edit_rights['can_reassign_level2'] ? '' : 'disabled'; ?>>
                         <option value="">Select Department</option>
                         <?php foreach ($departments as $dept): ?>
@@ -489,8 +540,7 @@ $aap_base = '../';
                         <option value="">Select Group</option>
                     </select>
                 </div>
-                <p class="alpro-muted" style="font-size:12px; margin:0 0 8px;">Picking a Group fills the table below with every staff member in it, each at the tier they hold there (Approval Unit Master) - read-only here. Only one Group per level - picking a different one replaces the table. To change who's in a Group or their tier, update it in the Approval Unit Master, then re-pick.</p>
-                <div class="aap-modern">
+                <div class="aap-modern" id="ct_staff_tier_wrap">
                 <table class="alpro-table aap-ct-list-table" id="ct_staff_tier_table" width="100%">
                     <thead><tr><th>Staff</th><th>Tier</th></tr></thead>
                     <tbody id="ct_staff_tier_tbody"></tbody>
@@ -505,12 +555,17 @@ $aap_base = '../';
         override: anyone on this list is blocked from approving this Case
         Type regardless of their Level 2 tier (see aapCanApprove() in
         aap_lib.php). Labelled accordingly, not "Executed Mode". -->
-        <p class="aap-ct-level-title">Level 3 - Approval Exclusion Assign<?php if (!$edit_rights['can_reassign_level3'] && !$edit_rights['can_edit_level3_group']): ?> <span class="aap-admin-info-icon">i<span class="aap-admin-tooltip">Only the department holding Level 3 can change this.</span></span><?php endif; ?></p>
+        <p class="aap-ct-level-title">Level 3 - Approval Executed Assign<?php if (!$edit_rights['can_reassign_level3'] && !$edit_rights['can_edit_level3_group']): ?> <span class="aap-admin-info-icon">i<span class="aap-admin-tooltip">Only the department holding Level 3 can change this.</span></span><?php endif; ?></p>
         <div class="aap-ct-level aap-ct-level-3">
             <div class="aap-ct-field" style="grid-column: 1 / -1;">
                 <label>Staff Tier <span style="color:red;">*</span></label>
-                <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
-                    <select class="alpro-input" id="ct_pool_department_lvl3" style="flex:1;" <?php echo $edit_rights['can_reassign_level3'] ? '' : 'disabled'; ?>>
+                <div class="aap-ct-field-inline" style="margin-bottom:8px;">
+                    <input type="checkbox" name="level3_hod_only" id="ct_level3_hod_only" value="1" <?php echo !empty($edit_case_type['level3_hod_only']) ? 'checked' : ''; ?> <?php echo $edit_rights['can_reassign_level3'] ? '' : 'disabled'; ?>>
+                    <label for="ct_level3_hod_only" style="display:inline; font-weight:normal;">HOD Approval Only <span class="aap-admin-info-icon">i<span class="aap-admin-tooltip">The Head of Department (from Alpro's HOD list) of whichever department actually raised the case becomes the sole approver for this level, for any value from 0 to Unlimited - resolved per case, not fixed here, so the same Case Type can route to a different HOD depending on who raised it. The Department/Group/Staff Tier roster below is ignored while this is checked. Takes priority over Level 2's own HOD-Only setting if both are checked.</span></span></label>
+                </div>
+                <div id="ct_hod_note_lvl3" style="display:none; padding:8px 12px; background:#f1f3f5; border-radius:6px; font-size:13px; color:#495057; margin-bottom:8px;">Approver is resolved per case (the HOD of whoever raised it) - no department to pick here.</div>
+                <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;" id="ct_deptgroup_row_lvl3">
+                    <select class="alpro-input" name="department_id_ct_lvl3" id="ct_pool_department_lvl3" style="flex:1;" <?php echo $edit_rights['can_reassign_level3'] ? '' : 'disabled'; ?>>
                         <option value="">Select Department</option>
                         <?php foreach ($departments as $dept): ?>
                             <option value="<?php echo $dept['id']; ?>" <?php echo ($edit_rights['level3_dept'] !== null && $edit_rights['level3_dept'] == $dept['id']) ? 'selected' : ''; ?>><?php echo htmlspecialchars($dept['depart_name']); ?></option>
@@ -520,8 +575,7 @@ $aap_base = '../';
                         <option value="">Select Group</option>
                     </select>
                 </div>
-                <p class="alpro-muted" style="font-size:12px; margin:0 0 8px;">Picking a Group fills the table below with every staff member in it, each at the tier they hold there (Approval Unit Master) - read-only here. Only one Group per level - picking a different one replaces the table. To change who's in a Group or their tier, update it in the Approval Unit Master, then re-pick.</p>
-                <div class="aap-modern">
+                <div class="aap-modern" id="ct_staff_tier_wrap_lvl3">
                 <table class="alpro-table aap-ct-list-table" id="ct_staff_tier_table_lvl3" width="100%">
                     <thead><tr><th>Staff</th><th>Tier</th></tr></thead>
                     <tbody id="ct_staff_tier_tbody_lvl3"></tbody>
@@ -603,8 +657,8 @@ $aap_base = '../';
             <td class="alpro-mono"><?php echo (int)$ct['id']; ?></td>
             <td><?php echo htmlspecialchars($ct['case_type_name']); ?></td>
             <td><?php echo htmlspecialchars($dept_name ?: '—'); ?></td>
-            <td><?php echo htmlspecialchars(aapCaseTypeSectionLabel($conn, $approval_tiers, $dept_names)); ?></td>
-            <td><?php echo htmlspecialchars(aapCaseTypeSectionLabel($conn, $exclusion_tiers, $dept_names)); ?></td>
+            <td><?php echo htmlspecialchars(aapCaseTypeSectionLabel($conn, $approval_tiers, $dept_names, !empty($ct['level2_hod_only']))); ?></td>
+            <td><?php echo htmlspecialchars(aapCaseTypeSectionLabel($conn, $exclusion_tiers, $dept_names, !empty($ct['level3_hod_only']))); ?></td>
             <td><?php echo $ct['physical_confirm_required'] ? 'Required' : '—'; ?></td>
             <td><?php echo $ct['recycle'] ? '<span class="alpro-badge alpro-badge-voided">Inactive</span>' : '<span class="alpro-badge alpro-badge-approved">Active</span>'; ?></td>
             <td>

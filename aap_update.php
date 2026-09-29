@@ -120,7 +120,7 @@ $can_tag_physical = in_array($case['case_status'], ['draft', 'open'], true)
 // raised it can always act on it if they're Customer Support, without
 // needing to be on the Case Type's Staff Tier list at all.
 $can_act_approval = (aapIsCustomerSupport($aap_dept_ids) && (int)$case['created_by'] === (int)$id_user)
-    || aapCanApprove($conn, $id_user, $case['case_type_id'], $case['calculated_value'], $aap_is_admin);
+    || aapCanApprove($conn, $id_user, $case['case_type_id'], $case['calculated_value'], $aap_is_admin, $case['requester_department_id']);
 // $can_execute itself is computed earlier (before the download branches).
 $can_close   = $aap_is_admin || aapIsOperations($aap_dept_ids) || (int)$case['created_by'] === (int)$id_user;
 // Once a case has ever been suspended (Execution sending it back to
@@ -243,7 +243,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 // at the approval gate, so tell whoever's eligible to act on it
                 // now instead of waiting for the tag_physical step below.
                 if (!$updated['physical_confirm_required']) {
-                    $eligible = aapFetchEligibleApproverIds($conn, $updated['case_type_id'], $updated['calculated_value']);
+                    $eligible = aapFetchEligibleApproverIds($conn, $updated['case_type_id'], $updated['calculated_value'], $case['requester_department_id']);
                     foreach ($eligible as $approver_id) {
                         aapNotifyStaff($conn, $id, $approver_id, 'pending_approval');
                     }
@@ -267,7 +267,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             // Physical confirmation was the last thing standing between this
             // case and the approval gate - tell whoever's eligible it's their
             // turn now.
-            $eligible = aapFetchEligibleApproverIds($conn, $case['case_type_id'], $case['calculated_value']);
+            $eligible = aapFetchEligibleApproverIds($conn, $case['case_type_id'], $case['calculated_value'], $case['requester_department_id']);
             foreach ($eligible as $approver_id) {
                 aapNotifyStaff($conn, $id, $approver_id, 'pending_approval');
             }
@@ -285,6 +285,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 // (what used to be the separate "Correct" action) without a second button.
                 $approved_value = ($_POST['approved_value'] !== '') ? (float)$_POST['approved_value'] : (float)$case['calculated_value'];
                 $was_adjusted = abs($approved_value - (float)$case['calculated_value']) > 0.001;
+                // Report Description is only mandatory when something needs
+                // explaining - a straight approval at the requested value
+                // speaks for itself, but overriding the amount always needs a
+                // reason on record.
+                if ($was_adjusted && $remark === '') {
+                    $msg = "Report Description is required when adjusting the Approved Value."; $msg_type = "alpro-danger";
+                } else {
                 $stmt = $conn->prepare("UPDATE aap_cases SET approval_status='approved', approved_value=?, approver_staff_id=?, approved_at=?, approval_remark=?, updated_at=? WHERE id=?");
                 $stmt->bind_param("disssi", $approved_value, $id_user, $now, $remark, $now, $id);
                 $stmt->execute(); $stmt->close();
@@ -292,7 +299,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 aapLogAudit($conn, $id, 'case_approved', $id_user, $audit_summary, ['approved_value' => $approved_value]);
                 aapNotifyStaff($conn, $id, (int)$case['created_by'], 'case_approved');
                 $msg = "Case approved. Requester notified."; $msg_type = "alpro-success";
+                }
             } elseif ($action === 'reject') {
+                // Rejecting always needs a reason on record - unlike a
+                // straight approval, there's no "speaks for itself" default.
+                if ($remark === '') {
+                    $msg = "Report Description is required when rejecting a case."; $msg_type = "alpro-danger";
+                } else {
                 $stmt = $conn->prepare("UPDATE aap_cases SET approval_status='rejected', approver_staff_id=?, approved_at=?, approval_remark=?, case_status='rejected', closed_at=?, updated_at=? WHERE id=?");
                 $stmt->bind_param("issssi", $id_user, $now, $remark, $now, $now, $id);
                 $stmt->execute(); $stmt->close();
@@ -304,7 +317,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     aapCancelLinkedFixitTicket($conn, $case['fixit_record_id'], $id_user);
                 }
                 $msg = "Case rejected. Requester notified."; $msg_type = "alpro-success";
+                }
             }
+        }
+    } elseif ($action === 'suspend_case_approval' && $can_act_approval && $case['case_status'] !== 'draft' && $case['approval_status'] === 'pending') {
+        // Approval's own Suspend Case - same mechanic as Execution's (see
+        // 'suspend_case' below), just one stage earlier: instead of
+        // deciding, Approval can send the case back for more evidence.
+        // approval_status stays 'pending' (nothing to reset there - it never
+        // left pending), only the physical-confirm gate reopens when this
+        // Case Type has one; a Case Type with no physical step at all has
+        // nowhere earlier to send it back to, so physical_confirm_status
+        // just stays 'not_required'. Either way, suspended_at bumps forward
+        // so evidence-freeze/turnaround timing starts fresh from here (see
+        // aapCaseCurrentPhaseStartedAt() in aap_lib.php), and suspend_count
+        // increments the same audit trail Execution's suspend feeds.
+        $suspend_reason = trim($_POST['suspend_reason'] ?? '');
+        if ($suspend_reason === '') {
+            $msg = "A reason is required to suspend this case."; $msg_type = "alpro-danger";
+        } else {
+            $new_physical_status = (int)$case['physical_confirm_required'] === 1 ? 'pending' : 'not_required';
+            $stmt = $conn->prepare("
+                UPDATE aap_cases SET
+                    physical_confirm_status = ?,
+                    suspended_at = ?, suspended_by = ?, suspend_reason = ?, suspend_count = suspend_count + 1, updated_at = ?
+                WHERE id = ?
+            ");
+            $stmt->bind_param("ssissi", $new_physical_status, $now, $id_user, $suspend_reason, $now, $id);
+            $stmt->execute(); $stmt->close();
+            aapLogAudit($conn, $id, 'case_suspended', $id_user, "Suspended by Approval: $suspend_reason. Case sent back for more evidence.");
+            aapNotifyStaff($conn, $id, (int)$case['created_by'], 'case_suspended');
+            $msg = "Case suspended. Requester notified."; $msg_type = "alpro-success";
         }
     } elseif ($action === 'execute' && $can_execute && in_array($case['approval_status'], ['approved', 'corrected'], true) && $case['execution_status'] === 'pending') {
         // Execute and Close are separate steps/actions again - this only
@@ -324,7 +367,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             aapLogAudit($conn, $id, 'case_executed', $id_user, "Executed (ref: $exec_ref). Ready to close.");
             $msg = "Case executed. Close the case below to notify the requester and finish."; $msg_type = "alpro-success";
         }
-    } elseif ($action === 'suspend_case' && $can_execute && in_array($case['approval_status'], ['approved', 'corrected'], true) && $case['execution_status'] === 'pending' && (int)$case['suspend_count'] === 0) {
+    } elseif ($action === 'execute_and_close' && $can_execute && in_array($case['approval_status'], ['approved', 'corrected'], true) && $case['execution_status'] === 'pending') {
+        // Shortcut for whoever can execute to do both steps in one click,
+        // instead of Execute now and coming back later for the separate
+        // "Notify Requester & Close Case" step - same two updates as the
+        // 'execute' and 'close' actions above, just run back to back in one
+        // request rather than requiring a second page visit.
+        $exec_ref = trim($_POST['execution_reference']);
+        if ($exec_ref === '') {
+            $msg = "Execution reference is required."; $msg_type = "alpro-danger";
+        } else {
+            $stmt = $conn->prepare("UPDATE aap_cases SET execution_status='executed', execution_reference=?, executor_staff_id=?, executed_at=?, case_status='closed', closed_at=?, updated_at=? WHERE id=?");
+            $stmt->bind_param("sisssi", $exec_ref, $id_user, $now, $now, $now, $id);
+            $stmt->execute(); $stmt->close();
+            aapLogAudit($conn, $id, 'case_executed', $id_user, "Executed (ref: $exec_ref).");
+            aapLogAudit($conn, $id, 'case_closed', $id_user, "Case closed and requester notified.");
+            aapNotifyStaff($conn, $id, (int)$case['created_by'], 'case_closed');
+            if (!empty($case['fixit_record_id'])) {
+                aapCompleteLinkedFixitTicket($conn, $case['fixit_record_id'], $id_user);
+            }
+            $msg = "Case executed and closed. Requester notified."; $msg_type = "alpro-success";
+        }
+    } elseif ($action === 'suspend_case' && $can_execute && in_array($case['approval_status'], ['approved', 'corrected'], true) && $case['execution_status'] === 'pending') {
         // Execution can send a case back to Verification/Approval instead of
         // executing it - e.g. not enough evidence surfaced to actually carry
         // out the payout. Never goes back to Draft (case_status stays
@@ -361,7 +425,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             aapLogAudit($conn, $id, 'case_suspended', $id_user, "Suspended by Execution: $suspend_reason. Case sent back to Verification/Approval.");
 
             aapNotifyStaff($conn, $id, (int)$case['created_by'], 'case_suspended');
-            $eligible = aapFetchEligibleApproverIds($conn, $case['case_type_id'], $case['calculated_value']);
+            $eligible = aapFetchEligibleApproverIds($conn, $case['case_type_id'], $case['calculated_value'], $case['requester_department_id']);
             foreach ($eligible as $approver_id) {
                 aapNotifyStaff($conn, $id, $approver_id, 'case_suspended');
             }
@@ -555,7 +619,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     exit;
 }
 
-// ---- SOP progress stepper — Raised -> [Verification Required] -> Approval -> Execution -> Closed ----
+// ---- SOP progress stepper — Raised -> [Verification Reference] -> Approval -> Execution -> Closed ----
 $aap_steps = [];
 if ($case['case_status'] === 'draft') {
     $aap_steps[] = ['label' => 'Open', 'sub' => 'Gathering evidence', 'state' => 'current'];
@@ -566,7 +630,7 @@ if ($case['case_status'] === 'draft') {
 $physical_ready = !$case['physical_confirm_required'] || in_array($case['physical_confirm_status'], ['not_required', 'confirmed'], true);
 if ($case['physical_confirm_required']) {
     $pstate = ($case['case_status'] === 'draft') ? 'upcoming' : (($case['physical_confirm_status'] === 'confirmed') ? 'done' : 'current');
-    $aap_steps[] = ['label' => 'Verification Required', 'sub' => aapPhysicalStatusLabel($case['physical_confirm_status']), 'state' => $pstate];
+    $aap_steps[] = ['label' => 'Verification Reference', 'sub' => aapPhysicalStatusLabel($case['physical_confirm_status']), 'state' => $pstate];
 }
 
 if ($case['case_status'] === 'draft') {
@@ -704,7 +768,7 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
     <?php endif; ?>
     <?php if ((int)$case['suspend_count'] > 0): ?>
         <div class="alpro-alert" style="background:#fdf3e0; color:#7a5a10; border-color:#f3dfa8;">
-            <i class="bi bi-pause-circle"></i> This case was suspended by Execution on <?php echo date('d-m-Y H:i', strtotime($case['suspended_at'])); ?> — see the Execution section below for the reason.
+            <i class="bi bi-pause-circle"></i> This case was suspended on <?php echo date('d-m-Y H:i', strtotime($case['suspended_at'])); ?> — see the Execution section below for who suspended it and why.
         </div>
     <?php endif; ?>
 
@@ -760,24 +824,24 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                 </div>
 
                 <div id="case-view">
-                    <div class="alpro-grid">
+                    <div class="aap-form-grid">
                         <div class="alpro-field"><label>Department</label><div><?php echo htmlspecialchars($case['requester_department_name'] ?: '—'); ?></div></div>
-                        <div class="alpro-field"><label>Case Type</label><div><?php echo htmlspecialchars($case['case_type_name']); ?></div></div>
+                        <div class="alpro-field aap-span-2"><label>Case Type</label><div><?php echo htmlspecialchars($case['case_type_name']); ?></div></div>
                     </div>
 
-                    <div class="alpro-grid alpro-mt-10">
+                    <div class="aap-form-grid">
                         <div class="alpro-field"><label>Customer Name</label><div><?php echo htmlspecialchars($case['customer_name'] ?: '—'); ?></div></div>
                         <div class="alpro-field"><label>Membership ID</label><div><?php echo htmlspecialchars($case['customer_membership_id'] ?: '—'); ?></div></div>
                         <div class="alpro-field"><label>Transaction No</label><div><?php echo htmlspecialchars($case['transaction_ref'] ?: '—'); ?></div></div>
                     </div>
 
-                    <div class="alpro-grid alpro-mt-10">
+                    <div class="aap-form-grid">
                         <div class="alpro-field"><label>Calculated Value (Requestor)</label><div><?php echo aapFormatValue($case['calculated_value'], $case['value_type']); ?></div></div>
-                        <div class="alpro-field"><label>Raised By</label><div><?php echo htmlspecialchars($case['requester_name'] ?: '—'); ?> on <?php echo date('d-m-Y H:i', strtotime($case['timestamp'])); ?></div></div>
+                        <div class="alpro-field aap-span-2"><label>Raised By</label><div><?php echo htmlspecialchars($case['requester_name'] ?: '—'); ?> on <?php echo date('d-m-Y H:i', strtotime($case['timestamp'])); ?></div></div>
                     </div>
 
-                    <div class="alpro-grid alpro-mt-10">
-                        <div class="alpro-field" style="grid-column: 1 / -1;">
+                    <div class="aap-form-grid">
+                        <div class="alpro-field aap-span-3">
                             <label>Report Description</label>
                             <div style="height:80px; max-height:400px; overflow-y:auto; resize:vertical; border:1px solid #e5e9ec; border-radius:6px; padding:8px 10px; background:#fff;"><?php echo nl2br(htmlspecialchars($case['recommended_outcome'] ?: '—')); ?></div>
                         </div>
@@ -788,14 +852,13 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                 <form id="case-edit" method="post" action="" enctype="multipart/form-data" style="display:none;">
                     <input type="hidden" name="action" id="case-edit-action-field" value="edit_case">
 
-                    <div class="alpro-grid" style="flex-wrap:nowrap;">
-                        <div class="alpro-field" style="flex:1; min-width:0;">
-                            <label>Department</label>
+                    <div class="aap-form-grid">
+                        <div class="alpro-field">
+                            <label>Department <span class="aap-info-icon">i<span class="aap-tooltip">Fixed to this case's own department - pick the Case Type from that department's list.</span></span></label>
                             <div class="alpro-input" style="background:#f1f3f5; display:flex; align-items:center; height:38px;"><?php echo htmlspecialchars($case['case_type_department_name'] ?: '—'); ?></div>
-                            <p class="alpro-muted" style="font-size:12px; margin:6px 0 0;">Fixed to this case's own department - pick the Case Type from that department's list.</p>
                         </div>
 
-                        <div class="alpro-field" style="flex:2; min-width:0;">
+                        <div class="alpro-field aap-span-2">
                             <label>Case Type <span class="aap-req">*</span></label>
                             <select class="alpro-input" name="case_type_id" id="edit_case_type_id" required style="height:38px;">
                                 <?php foreach ($edit_case_types as $ect): ?>
@@ -805,7 +868,7 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                         </div>
                     </div>
 
-                    <div class="alpro-grid alpro-mt-10">
+                    <div class="aap-form-grid">
                         <div class="alpro-field">
                             <label>Customer Name</label>
                             <input class="alpro-input" type="text" name="customer_name" value="<?php echo htmlspecialchars($case['customer_name'] ?? ''); ?>" readonly>
@@ -820,12 +883,12 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                         </div>
                     </div>
 
-                    <div class="alpro-grid alpro-mt-10">
+                    <div class="aap-form-grid">
                         <div class="alpro-field">
                             <label>Calculated Value (Requestor) <span class="aap-req">*</span></label>
                             <input class="alpro-input" type="number" step="0.01" min="0" name="calculated_value" value="<?php echo htmlspecialchars($case['calculated_value']); ?>" required>
                         </div>
-                        <div class="alpro-field">
+                        <div class="alpro-field aap-span-2">
                             <label>Value Type <span class="aap-req">*</span></label>
                             <select class="alpro-input" name="value_type" required>
                                 <option value="cash" <?php echo $case['value_type'] === 'cash' ? 'selected' : ''; ?>>Cash (RM)</option>
@@ -834,8 +897,8 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                         </div>
                     </div>
 
-                    <div class="alpro-grid alpro-mt-10">
-                        <div class="alpro-field" style="grid-column: 1 / -1;">
+                    <div class="aap-form-grid">
+                        <div class="alpro-field aap-span-3">
                             <label>Report Description <span class="aap-req">*</span></label>
                             <input class="alpro-input" type="text" name="recommended_outcome" value="<?php echo htmlspecialchars($case['recommended_outcome'] ?? ''); ?>" required>
                         </div>
@@ -882,19 +945,33 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                 <?php elseif ($case['approval_status'] === 'pending' && !$physical_ok): ?>
                     <div class="alpro-alert alpro-warn" style="margin-top:18px;"><i class="bi bi-exclamation-triangle"></i> Blocked — this case cannot be decided until the physical return is confirmed.</div>
                 <?php elseif ($case['approval_status'] === 'pending' && $can_act_approval): ?>
-                    <form method="post" action="" class="alpro-mt-10">
+                    <form method="post" action="" class="alpro-mt-10" id="approval-gate-form" data-original-value="<?php echo htmlspecialchars($case['calculated_value']); ?>">
                         <div class="alpro-grid">
-                            <div class="alpro-field" style="grid-column: 1 / -1;"><label>Approved Value <span class="aap-muted" style="font-weight:normal; font-size:11px; text-transform:uppercase;">(adjust if needed)</span></label><input class="alpro-input" type="number" step="0.01" min="0" name="approved_value" value="<?php echo htmlspecialchars($case['calculated_value']); ?>"></div>
+                            <div class="alpro-field" style="grid-column: 1 / -1;"><label>Approved Value <span class="aap-muted" style="font-weight:normal; font-size:11px; text-transform:uppercase;">(adjust if needed)</span></label><input class="alpro-input" type="number" step="0.01" min="0" name="approved_value" id="approved-value-input" value="<?php echo htmlspecialchars($case['calculated_value']); ?>"></div>
                             <div class="alpro-field" style="grid-column: 1 / -1;">
-                                <label>Report Description</label>
+                                <label>Report Description <span class="aap-req" id="approval-remark-req" style="display:none;">*</span> <span class="aap-muted" id="approval-remark-hint" style="font-weight:normal; font-size:11px; text-transform:none;"></span></label>
                                 <textarea class="alpro-input" name="approval_remark" id="approval-remark-input" placeholder="Reason / notes" style="height:60px; max-height:150px; resize:vertical; overflow-y:auto;"><?php echo htmlspecialchars($case['approval_remark'] ?? ''); ?></textarea>
+                                <div id="approval-remark-error" style="display:none; color:#dc3545; font-size:12px; margin-top:4px;"></div>
                                 <div style="text-align:right;"><span id="approval-remark-status" style="font-size:11px; color:#6c757d;"></span></div>
                             </div>
                         </div>
                         <hr style="border:none; border-top:1px solid #e5e9ec; margin:10px 0;">
-                        <div class="alpro-actions" style="flex-direction:row; flex-wrap:wrap; gap:4px;">
-                            <button class="alpro-btn alpro-btn-blue" type="submit" name="action" value="approve" title="Approve" onclick="return confirm('Approve this case?');" style="flex:1; min-width:0; padding:4px 6px; font-size:11px;"><i class="bi bi-check-lg"></i> Approve</button>
-                            <button class="alpro-btn" type="submit" name="action" value="reject" onclick="return confirm('Reject this case?');" style="flex:1; min-width:0; padding:4px 6px; font-size:11px; background:#dc3545; color:#fff; border:none;"><i class="bi bi-x-lg"></i> Reject</button>
+                        <div class="alpro-actions aap-actions-row">
+                            <button class="alpro-btn aap-btn-action aap-btn-action-primary" type="submit" name="action" value="approve" title="Approve" onclick="return aapApprovalGateSubmit(this, 'approve');"><i class="bi bi-check-lg"></i> Approve</button>
+                            <button class="alpro-btn aap-btn-action aap-btn-action-danger" type="submit" name="action" value="reject" onclick="return aapApprovalGateSubmit(this, 'reject');"><i class="bi bi-x-lg"></i> Reject</button>
+                            <button type="button" id="approval-suspend-toggle" class="alpro-btn aap-btn-action aap-btn-action-danger"><i class="bi bi-pause-circle"></i> Suspend Case</button>
+                        </div>
+                    </form>
+
+                    <form method="post" action="" id="approval-suspend-form" style="display:none;" class="alpro-mt-10" onsubmit="return confirm('Suspend this case and send it back for more evidence? Evidence already on the case stays locked forever, even once it is your turn to edit again. This cannot be undone.');">
+                        <input type="hidden" name="action" value="suspend_case_approval">
+                        <div class="alpro-field">
+                            <label>Suspend Reason <span class="aap-req">*</span></label>
+                            <textarea class="alpro-input" name="suspend_reason" required style="height:60px;" placeholder="e.g. not enough evidence submitted"></textarea>
+                        </div>
+                        <div class="alpro-actions aap-actions-row alpro-mt-10">
+                            <button class="alpro-btn aap-btn-action aap-btn-action-danger-solid" type="submit">Confirm Suspend</button>
+                            <button class="alpro-btn aap-btn-action aap-btn-action-neutral" type="button" id="approval-suspend-cancel">Cancel</button>
                         </div>
                     </form>
                 <?php elseif ($case['approval_status'] === 'pending'): ?>
@@ -904,7 +981,7 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
 
             <?php if ((int)$case['physical_confirm_required'] === 1): ?>
             <div class="aap-card" style="margin-top:15px;">
-                <h6 class="aap-card-title"><i class="bi bi-box-seam"></i> Verification Required</h6>
+                <h6 class="aap-card-title"><i class="bi bi-box-seam"></i> Verification Reference</h6>
                 <p style="margin: 0 0 4px;">Status: <strong><?php echo aapPhysicalStatusLabel($case['physical_confirm_status']); ?></strong></p>
                 <?php if ($case['physical_confirm_ref']): ?>
                     <p class="aap-meta-line">Ref: <span class="alpro-mono"><?php echo htmlspecialchars($case['physical_confirm_ref']); ?></span></p>
@@ -944,9 +1021,9 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                         <label>Reason</label>
                         <textarea class="alpro-input" name="void_reason" style="height:80px;" placeholder="Why is this case being rejected?"></textarea>
                     </div>
-                    <div class="alpro-actions alpro-mt-10">
-                        <button class="alpro-btn" type="submit" style="background:#dc3545; color:#fff; border:none; padding:8px 20px; font-size:14px; border-radius:8px;">Confirm Reject</button>
-                        <button class="alpro-btn" type="button" id="void-case-cancel" style="background:#fff; color:#212529; border:1px solid #000; padding:8px 20px; font-size:14px; border-radius:8px;">Cancel</button>
+                    <div class="alpro-actions aap-actions-row alpro-mt-10">
+                        <button class="alpro-btn aap-btn-action aap-btn-action-danger-solid" type="submit">Confirm Reject</button>
+                        <button class="alpro-btn aap-btn-action aap-btn-action-neutral" type="button" id="void-case-cancel">Cancel</button>
                     </div>
                 </form>
             </div>
@@ -961,12 +1038,12 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
             <?php if (in_array($case['approval_status'], ['approved', 'corrected'], true) || $case['executor_name'] || (int)$case['suspend_count'] > 0): ?>
             <div class="aap-card" style="margin-top:15px;">
                 <h6 class="aap-card-title"><i class="bi bi-gear"></i> Execution</h6>
-                <p class="aap-card-hint" style="margin:0 0 10px;">Confirms the approved refund/adjustment was actually carried out in CLS, OMC, or Xilnex — enter that system's reference number and execute to record it here. Closing and notifying the requester is a separate step below once executed.</p>
-                <p style="margin: 0 0 4px;">Status: <strong><?php echo ucfirst($case['execution_status']); ?></strong>
-                    <?php if ($case['execution_reference']): ?> — Ref: <span class="alpro-mono"><?php echo htmlspecialchars($case['execution_reference']); ?></span><?php endif; ?>
-                </p>
+                <p style="margin: 0 0 4px;">Status: <strong><?php echo ucfirst($case['execution_status']); ?></strong></p>
                 <?php if ($case['executor_name']): ?>
                     <p class="aap-meta-line">Executed by <?php echo htmlspecialchars($case['executor_name']); ?> on <?php echo date('d-m-Y H:i', strtotime($case['executed_at'])); ?></p>
+                <?php endif; ?>
+                <?php if ($case['execution_reference']): ?>
+                    <p class="aap-meta-line" style="white-space:pre-wrap;">Remarks: <?php echo htmlspecialchars($case['execution_reference']); ?></p>
                 <?php endif; ?>
                 <?php if ($case['suspended_at']): ?>
                     <p class="aap-meta-line" style="color:#b8860b;">Suspended by <?php echo htmlspecialchars($case['suspended_by_name'] ?: 'Unknown'); ?> on <?php echo date('d-m-Y H:i', strtotime($case['suspended_at'])); ?><br>Reason: <?php echo htmlspecialchars($case['suspend_reason'] ?? ''); ?></p>
@@ -979,32 +1056,33 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                 // even though the outer card above stays visible for
                 // history the whole time. ?>
                 <?php if ($case['execution_status'] === 'pending' && in_array($case['approval_status'], ['approved', 'corrected'], true) && $can_execute): ?>
-                    <form method="post" action="" class="alpro-mt-10">
-                        <input type="hidden" name="action" value="execute">
+                    <form method="post" action="" id="execute-form" class="alpro-mt-10">
                         <div class="alpro-grid">
-                            <div class="alpro-field" style="grid-column: 1 / -1;"><label>Execution Reference (CLS / OMC / Xilnex) <span class="aap-req">*</span></label><textarea class="alpro-input" name="execution_reference" required style="height:38px; max-height:150px; resize:vertical; overflow-y:auto;"><?php echo htmlspecialchars($case['execution_reference'] ?? ''); ?></textarea></div>
+                            <div class="alpro-field" style="grid-column: 1 / -1;"><label>Execution Remarks <span class="aap-req">*</span></label><textarea class="alpro-input" name="execution_reference" required style="height:38px; max-height:150px; resize:vertical; overflow-y:auto;"><?php echo htmlspecialchars($case['execution_reference'] ?? ''); ?></textarea></div>
                         </div>
                         <hr style="border:none; border-top:1px solid #e5e9ec; margin:10px 0;">
-                        <button class="alpro-btn alpro-btn-blue" type="submit" onclick="return confirm('Execute this adjustment? Closing the case is now a separate step afterward.');" style="width:100%; padding:6px 10px; font-size:12px;"><i class="bi bi-play-fill"></i> <?php echo ((int)$case['suspend_count'] > 0) ? 'Execute (Suspended)' : 'Execute'; ?></button>
+                        <div class="alpro-actions aap-actions-row" id="execute-actions-default">
+                            <button type="button" id="execute-reveal-btn" class="alpro-btn aap-btn-action aap-btn-action-primary"><i class="bi bi-play-fill"></i> Execute</button>
+                            <button type="button" id="suspend-case-toggle" class="alpro-btn aap-btn-action aap-btn-action-danger"><i class="bi bi-pause-circle"></i> Suspend Case</button>
+                        </div>
+                        <div class="alpro-actions aap-actions-row" id="execute-actions-confirm" style="display:none; flex-wrap:nowrap;">
+                            <button type="submit" name="action" value="execute" class="alpro-btn aap-btn-action aap-btn-action-primary" onclick="return confirm('Execute this adjustment only? Closing the case is a separate step afterward.');" style="padding:6px 4px; font-size:11px;"><i class="bi bi-play-fill"></i> Execute in Progress</button>
+                            <button type="submit" name="action" value="execute_and_close" class="alpro-btn aap-btn-action aap-btn-action-primary" onclick="return confirm('Execute AND close this case now? This notifies the requester and completes the linked Fixit ticket immediately. This cannot be undone.');" style="padding:6px 4px; font-size:11px;"><i class="bi bi-check2-all"></i> Execute and Close</button>
+                            <button type="button" id="execute-cancel-btn" class="alpro-btn aap-btn-action aap-btn-action-neutral" style="padding:6px 4px; font-size:11px;">Cancel</button>
+                        </div>
                     </form>
 
-                    <?php // A case can only ever be suspended once - not
-                    // available again on a re-run after it's already been
-                    // sent back this way one time. ?>
-                    <?php if ((int)$case['suspend_count'] === 0): ?>
-                    <button type="button" id="suspend-case-toggle" class="alpro-btn alpro-mt-10" style="width:100%; padding:6px 10px; font-size:12px; background:#fff; color:#b8860b; border:1px solid #b8860b;"><i class="bi bi-pause-circle"></i> Suspend Case</button>
                     <form method="post" action="" id="suspend-case-form" style="display:none;" class="alpro-mt-10" onsubmit="return confirm('Suspend this case and send it back to Verification/Approval? Evidence already on the case stays locked forever, even once it is your turn to edit again. This cannot be undone.');">
                         <input type="hidden" name="action" value="suspend_case">
                         <div class="alpro-field">
                             <label>Suspend Reason <span class="aap-req">*</span></label>
                             <textarea class="alpro-input" name="suspend_reason" required style="height:60px;" placeholder="e.g. not enough evidence submitted"></textarea>
                         </div>
-                        <div class="alpro-actions alpro-mt-10">
-                            <button class="alpro-btn" type="submit" style="background:#b8860b; color:#fff; border:none; padding:8px 20px; font-size:14px; border-radius:8px;">Confirm Suspend</button>
-                            <button class="alpro-btn" type="button" id="suspend-case-cancel" style="background:#fff; color:#212529; border:1px solid #000; padding:8px 20px; font-size:14px; border-radius:8px;">Cancel</button>
+                        <div class="alpro-actions aap-actions-row alpro-mt-10">
+                            <button class="alpro-btn aap-btn-action aap-btn-action-danger-solid" type="submit">Confirm Suspend</button>
+                            <button class="alpro-btn aap-btn-action aap-btn-action-neutral" type="button" id="suspend-case-cancel">Cancel</button>
                         </div>
                     </form>
-                    <?php endif; ?>
                 <?php endif; ?>
 
                 <?php // Same eligibility as the Execute/Suspend buttons above -
@@ -1215,7 +1293,7 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                     </div>
                 </div>
                 <div class="alpro-actions alpro-mt-10">
-                    <button type="submit" style="background:#fff; color:#0d6efd; border:1px solid #0d6efd; border-radius:20px; padding:8px 18px; font-size:13px; font-weight:600; cursor:pointer; display:inline-flex; align-items:center; gap:6px;"><i class="bi bi-plus-lg"></i> Add Evidence</button>
+                    <button type="submit" class="alpro-btn aap-btn-action aap-btn-action-outline-primary" style="flex:0 0 auto;"><i class="bi bi-plus-lg"></i> Add Evidence</button>
                 </div>
                 </form>
                 <?php endif; ?>

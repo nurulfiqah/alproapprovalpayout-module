@@ -2,6 +2,20 @@
    legacy Alpro-framework pages and the "modern" pages - loaded by
    aap_sidebar.php, included on every AAP page. */
 
+/* Shrink the blue page-title banner and the nav bar beneath it - both come
+   from the shared outer framework's own generous defaults (14px/22px
+   padding, 26px icon). Scoped to this module only: .header/.headerH1 are
+   overridden directly since AAP never needs the extra room other modules
+   might, and the nav gets its own .aap-topnav class (added in
+   aap_sidebar.php) rather than touching .alpro-box globally, since that
+   class is also used for ordinary content cards elsewhere in AAP that
+   should keep their normal padding. */
+.header { padding: 8px 18px; margin: 10px 0 12px; }
+.headerH1 { font-size: 16px; }
+.headerH1 img { width: 20px; height: 20px; }
+.aap-topnav { padding: 8px 14px; }
+.aap-topnav .alpro-btn { padding: 5px 10px; font-size: 12.5px; }
+
 select.alpro-input {
     height: auto !important;
     min-height: 38px !important;

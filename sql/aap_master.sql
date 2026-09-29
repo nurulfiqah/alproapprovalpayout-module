@@ -94,6 +94,22 @@ CREATE TABLE `aap_case_types` (
   `department_id` INT UNSIGNED NOT NULL,
   `physical_confirm_required` TINYINT(1) NOT NULL DEFAULT 0,
   `description` VARCHAR(255) NULL,
+  -- HOD Approval Only: when set, this level's approver isn't drawn from the
+  -- Staff Tier roster at all, and has no department stored on the Case Type
+  -- either - it's resolved fresh per case, from whichever department
+  -- actually raised THAT case (aap_cases.requester_department_id), looked up
+  -- against `hod_id` in iidas_department (Alpro's existing HOD-per-department
+  -- table, kept live rather than copied). Deliberately dynamic: the same
+  -- Case Type can route to a different HOD for each case, depending on who
+  -- raised it (e.g. a "Customer Refund" Case Type owned by Operation at
+  -- Level 1 still routes to Customer Support's HOD for a case a Customer
+  -- Support staff member raised) - covers every value from 0 to Unlimited.
+  -- Level 3 (still 'exclusion' in aap_case_type_staff_tiers) takes
+  -- precedence over Level 2 when both are set, matching "exclusion always
+  -- wins" from aapCanApprove()'s existing behavior. See
+  -- aapFetchDepartmentHodStaffIds()/aapCanApprove() in aap_lib.php.
+  `level2_hod_only` TINYINT(1) NOT NULL DEFAULT 0,
+  `level3_hod_only` TINYINT(1) NOT NULL DEFAULT 0,
   `recycle` TINYINT(1) NOT NULL DEFAULT 0,
   `timestamp` DATETIME NOT NULL,
   KEY `idx_aap_case_types_department` (`department_id`)
@@ -167,7 +183,7 @@ CREATE TABLE `aap_case_type_staff_tiers` (
 -- --------------------------------------------------------
 -- aap_cases
 -- The core case record — one row per raised case, carrying it through
--- the full lifecycle (Draft -> Open -> Verification Required -> Approval ->
+-- the full lifecycle (Draft -> Open -> Verification Reference -> Approval ->
 -- Execution -> Closed/Rejected/Voided).
 -- --------------------------------------------------------
 
@@ -225,9 +241,13 @@ CREATE TABLE `aap_cases` (
   `approved_value` DECIMAL(12,2) NULL DEFAULT NULL,
   `approver_staff_id` INT NULL DEFAULT NULL,
   `approved_at` DATETIME NULL DEFAULT NULL,
-  `approval_remark` VARCHAR(255) NULL,
+  -- TEXT, not VARCHAR(255) - a free-text reason typed by an approver has no
+  -- natural length cap, and a too-long value under strict SQL mode used to
+  -- crash the whole approve/reject request outright (same bug class as
+  -- execution_reference above - see that column's history).
+  `approval_remark` TEXT NULL,
   `execution_status` ENUM('pending','executed') NOT NULL DEFAULT 'pending',
-  `execution_reference` VARCHAR(100) NULL,
+  `execution_reference` TEXT NULL,
   `executor_staff_id` INT NULL DEFAULT NULL,
   `executed_at` DATETIME NULL DEFAULT NULL,
   -- 'draft' = still gathering evidence, not yet in the approval workflow
@@ -249,7 +269,8 @@ CREATE TABLE `aap_cases` (
   -- behavior.
   `suspended_at` DATETIME NULL DEFAULT NULL,
   `suspended_by` INT NULL DEFAULT NULL,
-  `suspend_reason` VARCHAR(255) NULL,
+  -- TEXT, not VARCHAR(255) - same reasoning as approval_remark above.
+  `suspend_reason` TEXT NULL,
   `suspend_count` INT UNSIGNED NOT NULL DEFAULT 0,
   UNIQUE KEY `uq_aap_cases_ref` (`case_ref`),
   KEY `idx_aap_cases_type` (`case_type_id`),
