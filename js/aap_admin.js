@@ -3,10 +3,6 @@ document.addEventListener('DOMContentLoaded', function () {
         var d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML;
     }
 
-    function fmtValue(v) {
-        return v === null ? 'Unlimited' : 'RM ' + Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    }
-
     // Tier options are that department's own Approval Unit Master tiers (or
     // the shared Default list if it hasn't customized any) - never a fixed
     // Unlimited/Tier 1/Tier 2 list. Cached per department_id since the same
@@ -134,7 +130,7 @@ document.addEventListener('DOMContentLoaded', function () {
         // what tier, fix it at the source (the Group) and re-Add.
         function tierDisplayHtml(tiers, tierName) {
             var t = tiers.find(function (x) { return x.tier_name === tierName; });
-            return t ? (esc(t.tier_name) + ' (' + esc(fmtValue(t.tier_value)) + ')') : esc(tierName || '');
+            return t ? esc(t.tier_name) : esc(tierName || '');
         }
 
         // Adding a staff member already in the table just updates their row
@@ -267,16 +263,20 @@ document.addEventListener('DOMContentLoaded', function () {
             if (approvalJsonInput) approvalJsonInput.value = JSON.stringify(approvalRows);
             if (exclusionJsonInput) exclusionJsonInput.value = JSON.stringify(exclusionRows);
 
-            // Level 2/3 Staff Tier and Description are all required (server
-            // re-checks this too - see aap_admin.php's save_case_type
-            // handler) - a Case Type nobody can approve or execute under
-            // isn't useful to save.
-            if (!approvalRows.length) {
+            // Level 2/3 Staff Tier is required UNLESS that level is HOD
+            // Approval Only - HOD mode has no Staff Tier roster at all by
+            // design (the approver is resolved per case instead, see
+            // aapCanApprove() in aap_lib.php), so an empty table there is
+            // correct, not an error. Written before HOD Approval Only
+            // existed, so it didn't know to check for it.
+            var level2HodOnly = document.getElementById('ct_level2_hod_only');
+            var level3HodOnly = document.getElementById('ct_level3_hod_only');
+            if (!approvalRows.length && !(level2HodOnly && level2HodOnly.checked)) {
                 e.preventDefault();
                 alert('At least one Group must be added under Level 2 - Approval Mode Assign.');
                 return;
             }
-            if (!exclusionRows.length) {
+            if (!exclusionRows.length && !(level3HodOnly && level3HodOnly.checked)) {
                 e.preventDefault();
                 alert('At least one Group must be added under Level 3 - Approval Executed Assign.');
                 return;

@@ -138,6 +138,19 @@ $can_void    = (in_array($case['case_status'], ['draft', 'open'], true) && $case
 $can_open_case = $case['case_status'] === 'draft'
                && ((int)$case['created_by'] === (int)$id_user || $aap_is_admin);
 
+// Active: Open Case (and, for a Case Type that requires it, physical
+// verification afterward) no longer drops a case straight onto an
+// approver's desk - it lands here first, still fully in the requester's own
+// hands, until they explicitly click Submit for Approval. Same population
+// as Open Case (issuer or admin). $physical_ready mirrors the Approve/
+// Reject gate's own check further down.
+$physical_ready = !$case['physical_confirm_required'] || in_array($case['physical_confirm_status'], ['not_required', 'confirmed'], true);
+$can_submit_for_approval = $case['case_status'] === 'open'
+               && empty($case['submitted_for_approval'])
+               && $physical_ready
+               && $case['approval_status'] === 'pending'
+               && ((int)$case['created_by'] === (int)$id_user || $aap_is_admin);
+
 // Case Summary, and existing evidence (notes/attachments), are only
 // editable/removable before a decision is made and before the
 // physical-return workflow has actually started (RFID tagged/confirmed) —
@@ -145,8 +158,12 @@ $can_open_case = $case['case_status'] === 'draft'
 // confirmation gate from whatever the new Case Type expects, and once the
 // case reaches the Approval stage the approver is reviewing exactly what's
 // there, so it must stop shifting underneath them. Also editable while still
-// a Draft, since that's exactly when evidence is being gathered.
+// a Draft/Active, since that's exactly when evidence is being gathered -
+// approval_status alone isn't enough to tell Active apart from actually
+// being at the Approval gate (it stays 'pending' through both), hence the
+// explicit submitted_for_approval check.
 $can_edit_case = (in_array($case['case_status'], ['draft', 'open'], true) && $case['approval_status'] === 'pending'
+                   && empty($case['submitted_for_approval'])
                    && in_array($case['physical_confirm_status'], ['not_required', 'pending'], true))
                && ((int)$case['created_by'] === (int)$id_user || $aap_is_admin);
 
@@ -195,7 +212,7 @@ if (isset($_SESSION['aap_flash_msg'])) {
 // flow below since it must reply with JSON and not reload the page while the
 // user is still typing. Free text only, doesn't itself approve/correct/reject
 // - just keeps the draft remark saved so it isn't lost before a decision is made. ----
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'ajax_save_remark' && $can_act_approval && $case['approval_status'] === 'pending') {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'ajax_save_remark' && $can_act_approval && $case['approval_status'] === 'pending' && $case['submitted_for_approval']) {
     ob_end_clean();
     header('Content-Type: application/json');
     $remark_text = trim($_POST['remark'] ?? '');
@@ -238,24 +255,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $stmt = $conn->prepare("UPDATE aap_cases SET case_status='open', updated_at=? WHERE id=?");
                 $stmt->bind_param("si", $now, $id);
                 $stmt->execute(); $stmt->close();
-                aapLogAudit($conn, $id, 'case_opened', $id_user, "Case opened — evidence gathering complete, ready for the approval workflow.");
-                // No physical confirmation to wait on - this case is immediately
-                // at the approval gate, so tell whoever's eligible to act on it
-                // now instead of waiting for the tag_physical step below.
-                if (!$updated['physical_confirm_required']) {
-                    $eligible = aapFetchEligibleApproverIds($conn, $updated['case_type_id'], $updated['calculated_value'], $case['requester_department_id']);
-                    foreach ($eligible as $approver_id) {
-                        aapNotifyStaff($conn, $id, $approver_id, 'pending_approval');
-                    }
-                }
+                aapLogAudit($conn, $id, 'case_opened', $id_user, "Case opened — evidence gathering complete.");
+                // Opening no longer notifies approvers itself, even when
+                // there's no physical step to wait on - the case lands in
+                // Active first, and only the separate 'submit_for_approval'
+                // action (below) actually puts it in front of an approver.
                 $msg = "Case opened."; $msg_type = "alpro-success";
             }
         }
     } elseif ($action === 'tag_physical' && $can_tag_physical && $case['case_status'] !== 'draft' && $case['physical_confirm_status'] === 'pending') {
         // Tag + confirm in one step - the separate "Confirm Receipt at ACMM
         // (Reverse Team)" action was merged in here, so entering the RFID
-        // reference takes the case straight to 'confirmed' and on to the
-        // approval gate instead of sitting in an intermediate 'tagged' state.
+        // reference takes the case straight to 'confirmed' and on to Active,
+        // instead of sitting in an intermediate 'tagged' state.
         $ref = trim($_POST['physical_confirm_ref']);
         if ($ref === '') {
             $msg = "RFID / tag reference is required."; $msg_type = "alpro-danger";
@@ -263,17 +275,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $stmt = $conn->prepare("UPDATE aap_cases SET physical_confirm_status='confirmed', physical_confirm_ref=?, physical_tagged_by=?, physical_tagged_at=?, physical_confirmed_by=?, physical_confirmed_at=?, updated_at=? WHERE id=?");
             $stmt->bind_param("sisissi", $ref, $id_user, $now, $id_user, $now, $now, $id);
             $stmt->execute(); $stmt->close();
-            aapLogAudit($conn, $id, 'physical_confirmed', $id_user, "Item tagged and confirmed (ref: $ref). Case ready for the approval gate.");
-            // Physical confirmation was the last thing standing between this
-            // case and the approval gate - tell whoever's eligible it's their
-            // turn now.
-            $eligible = aapFetchEligibleApproverIds($conn, $case['case_type_id'], $case['calculated_value'], $case['requester_department_id']);
-            foreach ($eligible as $approver_id) {
-                aapNotifyStaff($conn, $id, $approver_id, 'pending_approval');
-            }
-            $msg = "Item tagged and confirmed. Case is now ready for approval."; $msg_type = "alpro-success";
+            aapLogAudit($conn, $id, 'physical_confirmed', $id_user, "Item tagged and confirmed (ref: $ref).");
+            // Physical confirmation being done no longer notifies approvers
+            // itself - the case sits in Active until the requester clicks
+            // Submit for Approval ('submit_for_approval' below).
+            $msg = "Item tagged and confirmed."; $msg_type = "alpro-success";
         }
-    } elseif (in_array($action, ['approve', 'reject'], true) && $can_act_approval && $case['case_status'] !== 'draft' && $case['approval_status'] === 'pending') {
+    } elseif ($action === 'submit_for_approval' && $can_submit_for_approval) {
+        // The one place eligible approvers are ever notified now - Open Case
+        // and Tag/Confirm Physical both just get the case ready and stop;
+        // this is the requester's own, explicit "yes, send it now" step.
+        $stmt = $conn->prepare("UPDATE aap_cases SET submitted_for_approval = 1, updated_at = ? WHERE id = ?");
+        $stmt->bind_param("si", $now, $id);
+        $stmt->execute(); $stmt->close();
+        aapLogAudit($conn, $id, 'submitted_for_approval', $id_user, "Submitted for approval.");
+        $eligible = aapFetchEligibleApproverIds($conn, $case['case_type_id'], $case['calculated_value'], $case['requester_department_id']);
+        foreach ($eligible as $approver_id) {
+            aapNotifyStaff($conn, $id, $approver_id, 'pending_approval');
+        }
+        $msg = "Case submitted for approval. Approvers notified."; $msg_type = "alpro-success";
+    } elseif (in_array($action, ['approve', 'reject'], true) && $can_act_approval && $case['case_status'] !== 'draft' && $case['approval_status'] === 'pending' && $case['submitted_for_approval']) {
         $physical_ok = in_array($case['physical_confirm_status'], ['not_required', 'confirmed'], true);
         if (!$physical_ok) {
             $msg = "This case cannot be decided until the physical return is confirmed."; $msg_type = "alpro-danger";
@@ -320,18 +341,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 }
             }
         }
-    } elseif ($action === 'suspend_case_approval' && $can_act_approval && $case['case_status'] !== 'draft' && $case['approval_status'] === 'pending') {
+    } elseif ($action === 'suspend_case_approval' && $can_act_approval && $case['case_status'] !== 'draft' && $case['approval_status'] === 'pending' && $case['submitted_for_approval']) {
         // Approval's own Suspend Case - same mechanic as Execution's (see
         // 'suspend_case' below), just one stage earlier: instead of
         // deciding, Approval can send the case back for more evidence.
         // approval_status stays 'pending' (nothing to reset there - it never
-        // left pending), only the physical-confirm gate reopens when this
-        // Case Type has one; a Case Type with no physical step at all has
-        // nowhere earlier to send it back to, so physical_confirm_status
-        // just stays 'not_required'. Either way, suspended_at bumps forward
-        // so evidence-freeze/turnaround timing starts fresh from here (see
-        // aapCaseCurrentPhaseStartedAt() in aap_lib.php), and suspend_count
-        // increments the same audit trail Execution's suspend feeds.
+        // left pending); submitted_for_approval resets to 0 - the case drops
+        // back to Active and the requester has to click Submit for Approval
+        // again after fixing things, rather than it silently sitting back on
+        // an approver's desk unchanged. The physical-confirm gate reopens
+        // too when this Case Type has one; a Case Type with no physical step
+        // at all has nowhere earlier to send it back to, so
+        // physical_confirm_status just stays 'not_required'. Either way,
+        // suspended_at bumps forward so evidence-freeze/turnaround timing
+        // starts fresh from here (see aapCaseCurrentPhaseStartedAt() in
+        // aap_lib.php), and suspend_count increments the same audit trail
+        // Execution's suspend feeds.
         $suspend_reason = trim($_POST['suspend_reason'] ?? '');
         if ($suspend_reason === '') {
             $msg = "A reason is required to suspend this case."; $msg_type = "alpro-danger";
@@ -340,12 +365,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $stmt = $conn->prepare("
                 UPDATE aap_cases SET
                     physical_confirm_status = ?,
+                    submitted_for_approval = 0,
                     suspended_at = ?, suspended_by = ?, suspend_reason = ?, suspend_count = suspend_count + 1, updated_at = ?
                 WHERE id = ?
             ");
             $stmt->bind_param("ssissi", $new_physical_status, $now, $id_user, $suspend_reason, $now, $id);
             $stmt->execute(); $stmt->close();
-            aapLogAudit($conn, $id, 'case_suspended', $id_user, "Suspended by Approval: $suspend_reason. Case sent back for more evidence.");
+            aapLogAudit($conn, $id, 'case_suspended', $id_user, "Suspended by Approval: $suspend_reason. Case sent back to Active for more evidence.");
             aapNotifyStaff($conn, $id, (int)$case['created_by'], 'case_suspended');
             $msg = "Case suspended. Requester notified."; $msg_type = "alpro-success";
         }
@@ -417,20 +443,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     physical_confirm_status = ?,
                     approval_status = 'pending',
                     execution_status = 'pending',
+                    submitted_for_approval = 0,
                     suspended_at = ?, suspended_by = ?, suspend_reason = ?, suspend_count = suspend_count + 1, updated_at = ?
                 WHERE id = ?
             ");
             $stmt->bind_param("ssissi", $new_physical_status, $now, $id_user, $suspend_reason, $now, $id);
             $stmt->execute(); $stmt->close();
-            aapLogAudit($conn, $id, 'case_suspended', $id_user, "Suspended by Execution: $suspend_reason. Case sent back to Verification/Approval.");
+            aapLogAudit($conn, $id, 'case_suspended', $id_user, "Suspended by Execution: $suspend_reason. Case sent back to Active.");
 
+            // Drops back to Active, not straight back onto an approver's
+            // desk - only the requester is told now; approvers hear about it
+            // again once the requester re-submits ('submit_for_approval').
             aapNotifyStaff($conn, $id, (int)$case['created_by'], 'case_suspended');
-            $eligible = aapFetchEligibleApproverIds($conn, $case['case_type_id'], $case['calculated_value'], $case['requester_department_id']);
-            foreach ($eligible as $approver_id) {
-                aapNotifyStaff($conn, $id, $approver_id, 'case_suspended');
-            }
 
-            $msg = "Case suspended and sent back to Verification/Approval. Requester and approvers notified."; $msg_type = "alpro-success";
+            $msg = "Case suspended and sent back to Active. Requester notified."; $msg_type = "alpro-success";
         }
     } elseif ($action === 'add_execution_attachment' && $can_execute) {
         // Lets the executor attach more files after the fact (e.g. a later
@@ -460,6 +486,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             aapLogAudit($conn, $id, 'execution_attachment_removed', $id_user, "Removed execution attachment: " . $att['file_name']);
             $msg = "Execution attachment removed."; $msg_type = "alpro-success";
         }
+    } elseif ($action === 'toggle_execution_attachment_fixit' && $can_execute) {
+        // Opt-in per file - lets a specific execution attachment also
+        // surface on the originating Fixit ticket's own page (see
+        // execution_attachment_shared.php and fixit/index_specific.php's
+        // "AAP Case Progression" widget), instead of exposing every
+        // execution attachment there by default.
+        $att_id = (int)($_POST['attachment_id'] ?? 0);
+        $show = isset($_POST['show_in_fixit']) ? 1 : 0;
+        $stmt = $conn->prepare("SELECT file_name FROM aap_case_execution_attachments WHERE id = ? AND case_id = ?");
+        $stmt->bind_param("ii", $att_id, $id);
+        $stmt->execute();
+        $att = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if ($att) {
+            $ustmt = $conn->prepare("UPDATE aap_case_execution_attachments SET show_in_fixit = ? WHERE id = ?");
+            $ustmt->bind_param("ii", $show, $att_id);
+            $ustmt->execute(); $ustmt->close();
+            aapLogAudit($conn, $id, 'execution_attachment_fixit_visibility', $id_user, ($show ? "Shared" : "Unshared") . " with Fixit: " . $att['file_name']);
+            $msg = $show ? "Attachment will show on the Fixit ticket." : "Attachment hidden from the Fixit ticket."; $msg_type = "alpro-success";
+        }
     } elseif ($action === 'edit_case' && $can_edit_case) {
         // Requester Type / Requesting Channel are no longer collected on this
         // form (removed to match aap_add.php) - Requester Type falls back to
@@ -486,9 +532,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $msg = "Case details updated."; $msg_type = "alpro-success";
         }
     } elseif ($action === 'add_evidence' && $can_add_evidence) {
-        // Lets evidence (files/note) be saved on its own, without also having
-        // to fill in and resubmit the full Case Details form (edit_case above)
-        // just to attach a file.
+        // Lets evidence (files/note/reference link) be saved on its own,
+        // without also having to fill in and resubmit the full Case Details
+        // form (edit_case above) just to attach a file.
         $evidence_upload_result = aapUploadEvidenceFiles($conn, $id, $_FILES['evidence'] ?? null, $id_user, $now);
 
         $new_note = trim($_POST['new_note'] ?? '');
@@ -497,14 +543,43 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             aapLogAudit($conn, $id, 'note_added', $id_user, "Added a note");
         }
 
-        if ($evidence_upload_result['uploaded'] > 0 || $new_note !== '') {
+        $new_link_url = trim($_POST['new_link_url'] ?? '');
+        $new_link_label = trim($_POST['new_link_label'] ?? '');
+        $link_added = false;
+        $link_error = null;
+        if ($new_link_url !== '') {
+            if (!filter_var($new_link_url, FILTER_VALIDATE_URL) || !preg_match('#^https?://#i', $new_link_url)) {
+                $link_error = "Reference link must be a valid http(s):// URL.";
+            } else {
+                $link_label_final = $new_link_label !== '' ? $new_link_label : $new_link_url;
+                aapAddCaseReferenceLink($conn, $id, $new_link_url, $link_label_final, $id_user);
+                aapLogAudit($conn, $id, 'reference_link_added', $id_user, "Added a reference link: $link_label_final");
+                $link_added = true;
+            }
+        }
+
+        if ($link_error !== null) {
+            $msg = $link_error; $msg_type = "alpro-danger";
+        } elseif ($evidence_upload_result['uploaded'] > 0 || $new_note !== '' || $link_added) {
             if ($evidence_upload_result['uploaded'] > 0) aapLogAudit($conn, $id, 'evidence_added', $id_user, "Evidence attachment(s) added");
             $msg = "Evidence added."; $msg_type = "alpro-success";
             $aap_upload_warning .= aapUploadFailureNote($evidence_upload_result);
         } elseif ($evidence_upload_result['attempted'] > 0) {
             $msg = "Upload failed — check your connection and try again."; $msg_type = "alpro-danger";
         } else {
-            $msg = "Nothing to add — choose a file or write a note first."; $msg_type = "alpro-warn";
+            $msg = "Nothing to add — choose a file, write a note, or paste a link first."; $msg_type = "alpro-warn";
+        }
+    } elseif ($action === 'delete_reference_link' && $can_add_evidence) {
+        $link_id = (int)($_POST['link_id'] ?? 0);
+        $link = aapFetchCaseReferenceLink($conn, $link_id, $id);
+        if (!$link) {
+            $msg = "Reference link not found."; $msg_type = "alpro-danger";
+        } elseif (!aapCaseEvidenceItemEditable($link['created_by'], $link['timestamp'], $can_add_evidence, $id_user, $aap_is_admin, $case_phase_started_at)) {
+            $msg = "This reference link can no longer be removed."; $msg_type = "alpro-danger";
+        } else {
+            aapDeleteCaseReferenceLink($conn, $link_id, $id);
+            aapLogAudit($conn, $id, 'reference_link_removed', $id_user, "Removed reference link: " . $link['label']);
+            $msg = "Reference link removed."; $msg_type = "alpro-success";
         }
     } elseif ($action === 'delete_attachment' && $can_add_evidence) {
         $att_id = (int)($_POST['attachment_id'] ?? 0);
@@ -619,7 +694,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     exit;
 }
 
-// ---- SOP progress stepper — Raised -> [Verification Reference] -> Approval -> Execution -> Closed ----
+// ---- SOP progress stepper — Raised -> [Verification Reference] -> Active -> Approval -> Execution -> Closed ----
 $aap_steps = [];
 if ($case['case_status'] === 'draft') {
     $aap_steps[] = ['label' => 'Open', 'sub' => 'Gathering evidence', 'state' => 'current'];
@@ -633,6 +708,23 @@ if ($case['physical_confirm_required']) {
     $aap_steps[] = ['label' => 'Verification Reference', 'sub' => aapPhysicalStatusLabel($case['physical_confirm_status']), 'state' => $pstate];
 }
 
+// Active - the requester's own holding stage between being ready and
+// actually reaching an approver (see $can_submit_for_approval above). Sits
+// 'current' once physical verification (if any) is done but the case hasn't
+// been submitted yet; 'done' once it has, even if it's later suspended back
+// here (submitted_for_approval resets to 0, so it becomes 'current' again).
+if ($case['case_status'] === 'draft' || !$physical_ready) {
+    $active_state = 'upcoming'; $active_sub = '';
+} elseif (in_array($case['case_status'], ['rejected', 'voided'], true)) {
+    $active_state = $case['submitted_for_approval'] ? 'done' : 'failed';
+    $active_sub = $case['submitted_for_approval'] ? '' : 'Rejected before submission';
+} elseif (empty($case['submitted_for_approval'])) {
+    $active_state = 'current'; $active_sub = 'Ready to submit';
+} else {
+    $active_state = 'done'; $active_sub = '';
+}
+$aap_steps[] = ['label' => 'Active', 'sub' => $active_sub, 'state' => $active_state];
+
 if ($case['case_status'] === 'draft') {
     $astate = 'upcoming'; $asub = '';
 } elseif (in_array($case['case_status'], ['rejected', 'voided'], true)) {
@@ -640,8 +732,9 @@ if ($case['case_status'] === 'draft') {
 } elseif (in_array($case['approval_status'], ['approved', 'corrected'], true)) {
     $astate = 'done'; $asub = 'Approved';
 } elseif ($case['approval_status'] === 'pending') {
-    $astate = $physical_ready ? 'current' : 'upcoming';
-    $asub = $physical_ready ? aapFormatValue($case['calculated_value'], $case['value_type']) : '';
+    $ready_for_approval = $physical_ready && $case['submitted_for_approval'];
+    $astate = $ready_for_approval ? 'current' : 'upcoming';
+    $asub = $ready_for_approval ? aapFormatValue($case['calculated_value'], $case['value_type']) : '';
 } else {
     $astate = 'upcoming'; $asub = '';
 }
@@ -696,6 +789,7 @@ if ($can_execute) {
 }
 
 $case_notes = aapFetchCaseNotes($conn, $id);
+$reference_links = aapFetchCaseReferenceLinks($conn, $id);
 
 // Only needed to populate the Case Summary edit form's Case Type select -
 // scoped to the case's own department (same rule as aap_add.php's Case Type
@@ -944,6 +1038,14 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                     <?php endif; ?>
                 <?php elseif ($case['approval_status'] === 'pending' && !$physical_ok): ?>
                     <div class="alpro-alert alpro-warn" style="margin-top:18px;"><i class="bi bi-exclamation-triangle"></i> Blocked — this case cannot be decided until the physical return is confirmed.</div>
+                <?php elseif ($case['approval_status'] === 'pending' && empty($case['submitted_for_approval'])): ?>
+                    <div class="alpro-alert alpro-warn" style="margin-top:18px;"><i class="bi bi-pause-circle"></i> Active — ready, but not yet submitted for approval.</div>
+                    <?php if ($can_submit_for_approval): ?>
+                        <form method="post" action="" class="alpro-mt-10">
+                            <input type="hidden" name="action" value="submit_for_approval">
+                            <button class="alpro-btn alpro-btn-blue" type="submit" onclick="return confirm('Submit this case for approval? Approvers will be notified.');" style="width:100%; padding:6px 10px; font-size:12px;"><i class="bi bi-send"></i> Submit for Approval</button>
+                        </form>
+                    <?php endif; ?>
                 <?php elseif ($case['approval_status'] === 'pending' && $can_act_approval): ?>
                     <form method="post" action="" class="alpro-mt-10" id="approval-gate-form" data-original-value="<?php echo htmlspecialchars($case['calculated_value']); ?>">
                         <div class="alpro-grid">
@@ -1095,9 +1197,16 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                     <?php if (!empty($execution_attachments)): ?>
                         <ul class="aap-attach-list">
                             <?php foreach ($execution_attachments as $eatt): ?>
-                                <li>
-                                    <a href="?id=<?php echo $id; ?>&download_exec=<?php echo $eatt['id']; ?>"><i class="bi bi-file-earmark-arrow-down"></i> <?php echo htmlspecialchars($eatt['file_name']); ?></a>
-                                    <span style="display:flex; align-items:center; gap:8px;">
+                                <li style="display:flex; align-items:center; gap:8px;">
+                                    <form method="post" action="" style="display:inline-flex; align-items:center; gap:4px; flex-shrink:0;">
+                                        <input type="hidden" name="action" value="toggle_execution_attachment_fixit">
+                                        <input type="hidden" name="attachment_id" value="<?php echo (int)$eatt['id']; ?>">
+                                        <label style="display:inline-flex; align-items:center; margin:0;" title="Show this file on the linked Fixit ticket once executed">
+                                            <input type="checkbox" name="show_in_fixit" value="1" onchange="this.form.submit();" <?php echo !empty($eatt['show_in_fixit']) ? 'checked' : ''; ?>>
+                                        </label>
+                                    </form>
+                                    <a href="?id=<?php echo $id; ?>&download_exec=<?php echo $eatt['id']; ?>" style="flex:1;"><i class="bi bi-file-earmark-arrow-down"></i> <?php echo htmlspecialchars($eatt['file_name']); ?></a>
+                                    <span style="display:flex; align-items:center; gap:8px; flex-shrink:0;">
                                         <span style="font-size:11px; color:#6c757d;"><?php echo htmlspecialchars($eatt['uploaded_by_name'] ?: 'Unknown'); ?> &middot; <?php echo date('d-m-Y', strtotime($eatt['timestamp'])); ?></span>
                                         <form method="post" action="" style="display:inline;" onsubmit="return aapConfirmDeleteAttachment();">
                                             <input type="hidden" name="action" value="delete_execution_attachment">
@@ -1153,8 +1262,8 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                 <div id="bank-edit" style="display:none;">
                     <div class="alpro-grid">
                         <div class="alpro-field">
-                            <label>Bank Name <span class="aap-req">*</span></label>
-                            <select class="alpro-input" name="bank_id" form="case-edit" required>
+                            <label>Bank Name</label>
+                            <select class="alpro-input" name="bank_id" form="case-edit">
                                 <option value="">Select Bank</option>
                                 <?php foreach (aapFetchBankMasterOptions($conn) as $bank): ?>
                                     <option value="<?php echo $bank['id']; ?>" <?php echo ((int)($case['bank_id'] ?? 0) === (int)$bank['id']) ? 'selected' : ''; ?>><?php echo htmlspecialchars($bank['bank_name']); ?></option>
@@ -1162,12 +1271,12 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                             </select>
                         </div>
                         <div class="alpro-field">
-                            <label>Account Number <span class="aap-req">*</span></label>
-                            <input class="alpro-input" type="text" name="bank_account_number" id="edit-bank-account-number-input" form="case-edit" value="<?php echo htmlspecialchars($case['bank_account_number'] ?? ''); ?>" inputmode="numeric" pattern="[0-9]*" required>
+                            <label>Account Number</label>
+                            <input class="alpro-input" type="text" name="bank_account_number" id="edit-bank-account-number-input" form="case-edit" value="<?php echo htmlspecialchars($case['bank_account_number'] ?? ''); ?>" inputmode="numeric" pattern="[0-9]*">
                         </div>
                         <div class="alpro-field">
-                            <label>Account Holder Name <span class="aap-req">*</span></label>
-                            <input class="alpro-input" type="text" name="bank_account_holder" form="case-edit" value="<?php echo htmlspecialchars($case['bank_account_holder'] ?? ''); ?>" required>
+                            <label>Account Holder Name</label>
+                            <input class="alpro-input" type="text" name="bank_account_holder" form="case-edit" value="<?php echo htmlspecialchars($case['bank_account_holder'] ?? ''); ?>">
                         </div>
                     </div>
                 </div>
@@ -1274,6 +1383,32 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                             <p class="aap-card-hint" style="margin:0;">No files uploaded for this case.</p>
                         <?php endif; ?>
                     </div>
+
+                    <div class="alpro-field">
+                        <label>Reference Links</label>
+                        <?php if (!empty($reference_links)): ?>
+                        <ul class="aap-attach-list">
+                            <?php foreach ($reference_links as $link): ?>
+                                <?php $link_editable = aapCaseEvidenceItemEditable($link['created_by'], $link['timestamp'], $can_add_evidence, $id_user, $aap_is_admin, $case_phase_started_at); ?>
+                                <li>
+                                    <a href="<?php echo htmlspecialchars($link['url']); ?>" target="_blank" rel="noopener"><i class="bi bi-link-45deg"></i> <?php echo htmlspecialchars($link['label']); ?></a>
+                                    <span style="display:flex; align-items:center; gap:8px;">
+                                        <span style="font-size:11px; color:#6c757d;"><?php echo htmlspecialchars($link['created_by_name'] ?: 'Unknown'); ?> &middot; <?php echo date('d-m-Y', strtotime($link['timestamp'])); ?></span>
+                                        <?php if ($link_editable): ?>
+                                            <form method="post" action="" style="display:inline;" onsubmit="return aapConfirmDeleteReferenceLink();">
+                                                <input type="hidden" name="action" value="delete_reference_link">
+                                                <input type="hidden" name="link_id" value="<?php echo (int)$link['id']; ?>">
+                                                <button type="submit" title="Remove link" style="background:none; border:none; color:#dc3545; cursor:pointer; padding:0; font-size:13px;"><i class="bi bi-trash"></i></button>
+                                            </form>
+                                        <?php endif; ?>
+                                    </span>
+                                </li>
+                            <?php endforeach; ?>
+                        </ul>
+                        <?php else: ?>
+                            <p class="aap-card-hint" style="margin:0;">No reference links added.</p>
+                        <?php endif; ?>
+                    </div>
                 </div>
 
                 <?php if ($can_add_evidence): ?>
@@ -1290,6 +1425,11 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                         <label>Add More Evidence</label>
                         <input class="alpro-input" type="file" name="evidence[]" id="evidence-file-input" multiple>
                         <ul class="aap-attach-list" id="evidence-file-preview" style="margin-top:8px;"></ul>
+                    </div>
+                    <div class="alpro-field">
+                        <label>Reference Link</label>
+                        <input class="alpro-input" type="url" name="new_link_url" placeholder="https://..." style="margin-bottom:8px;">
+                        <input class="alpro-input" type="text" name="new_link_label" placeholder="Label (optional)">
                     </div>
                 </div>
                 <div class="alpro-actions alpro-mt-10">

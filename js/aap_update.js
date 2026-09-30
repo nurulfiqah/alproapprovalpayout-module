@@ -197,6 +197,14 @@ function aapConfirmDeleteNote() {
     return true;
 }
 
+function aapConfirmDeleteReferenceLink() {
+    if (!confirm('Remove this reference link?')) {
+        return false;
+    }
+    aapRememberEditState();
+    return true;
+}
+
 document.addEventListener('DOMContentLoaded', function () {
     var toggleBtn = document.getElementById('case-edit-toggle');
     var cancelBtn = document.getElementById('case-edit-cancel');

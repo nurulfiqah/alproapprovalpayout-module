@@ -272,8 +272,6 @@ if (isset($_POST['save_case_type'])) {
             $msg = "You don't have permission to manage this Case Type."; $msg_type = "alpro-danger";
         } elseif ($rights['can_edit_level1'] && ($name === '' || $department_id <= 0)) {
             $msg = "Case Type name and department are required."; $msg_type = "alpro-danger";
-        } elseif ($rights['can_edit_level1'] && $description === '') {
-            $msg = "Description is required."; $msg_type = "alpro-danger";
         } else {
             // Level 1 core fields - only touched if actually entitled; a
             // Level 2/3-only editor's submission leaves these columns
@@ -583,8 +581,8 @@ $aap_base = '../';
                 </div>
             </div>
             <div class="aap-ct-field" style="grid-column: 1 / -1;">
-                <label>Description <span style="color:red;">*</span></label>
-                <input class="alpro-input" type="text" name="ct_description" value="<?php echo htmlspecialchars($edit_case_type['description'] ?? ''); ?>" required <?php echo $edit_rights['can_edit_level1'] ? '' : 'disabled'; ?>>
+                <label>Description</label>
+                <input class="alpro-input" type="text" name="ct_description" value="<?php echo htmlspecialchars($edit_case_type['description'] ?? ''); ?>" <?php echo $edit_rights['can_edit_level1'] ? '' : 'disabled'; ?>>
                 <?php if (!$edit_rights['can_edit_level1']): ?><input type="hidden" name="ct_description" value="<?php echo htmlspecialchars($edit_case_type['description'] ?? ''); ?>"><?php endif; ?>
             </div>
         </div>

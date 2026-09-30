@@ -650,6 +650,51 @@ function aapDeleteCaseNote($conn, $note_id, $case_id) {
     $stmt->close();
 }
 
+// Named URL references added after case creation (Add New Evidence panel,
+// alongside notes/attachments) - e.g. a link to an external document,
+// ticket, or resource, when a file upload or note isn't the right fit.
+// Subject to the same evidence-freeze rule as notes/attachments
+// (aapCaseEvidenceItemEditable()) - see aap_update.php's 'add_evidence'/
+// 'delete_reference_link' actions.
+function aapFetchCaseReferenceLinks($conn, $case_id) {
+    $stmt = $conn->prepare("
+        SELECT l.*, s.nama_staff AS created_by_name
+        FROM aap_case_reference_links l
+        LEFT JOIN staff s ON s.id = l.created_by
+        WHERE l.case_id = ?
+        ORDER BY l.timestamp ASC
+    ");
+    $stmt->bind_param("i", $case_id);
+    $stmt->execute();
+    $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $stmt->close();
+    return $rows;
+}
+
+function aapAddCaseReferenceLink($conn, $case_id, $url, $label, $created_by) {
+    $now = date('Y-m-d H:i:s');
+    $stmt = $conn->prepare("INSERT INTO aap_case_reference_links (case_id, url, label, created_by, timestamp) VALUES (?, ?, ?, ?, ?)");
+    $stmt->bind_param("issis", $case_id, $url, $label, $created_by, $now);
+    $stmt->execute();
+    $stmt->close();
+}
+
+function aapFetchCaseReferenceLink($conn, $link_id, $case_id) {
+    $stmt = $conn->prepare("SELECT * FROM aap_case_reference_links WHERE id = ? AND case_id = ?");
+    $stmt->bind_param("ii", $link_id, $case_id);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    return $row;
+}
+
+function aapDeleteCaseReferenceLink($conn, $link_id, $case_id) {
+    $stmt = $conn->prepare("DELETE FROM aap_case_reference_links WHERE id = ? AND case_id = ?");
+    $stmt->bind_param("ii", $link_id, $case_id);
+    $stmt->execute();
+    $stmt->close();
+}
+
 // In-app notifications (mirrors okr_notifications) - one row per event a
 // staff member should be told about: the issuer on approved/rejected/closed,
 // or an eligible approver on pending_approval (see
@@ -1116,9 +1161,9 @@ function aapCaseOpenReadyErrors($case) {
     if ($case['calculated_value'] === null || $case['calculated_value'] === '') $missing[] = 'Calculated Value (Requestor)';
     if (empty($case['value_type'])) $missing[] = 'Value Type';
     if (trim((string)$case['recommended_outcome']) === '') $missing[] = 'Report Description';
-    if (empty($case['bank_id'])) $missing[] = 'Bank Name';
-    if (trim((string)($case['bank_account_number'] ?? '')) === '') $missing[] = 'Account Number';
-    if (trim((string)($case['bank_account_holder'] ?? '')) === '') $missing[] = 'Account Holder Name';
+    // Bank Detail (Bank Name/Account Number/Account Holder Name) is
+    // deliberately not required here - not every case pays out to a bank
+    // account (e.g. points, or a non-monetary outcome).
     return $missing;
 }
 
@@ -1315,6 +1360,12 @@ function aapCaseDisplayStatus($case) {
     }
     if (in_array($case['approval_status'], ['approved', 'corrected'], true) && $case['execution_status'] === 'pending') {
         return ['label' => 'Execute', 'slug' => 'executing'];
+    }
+    // Ready (physical step done, or none needed) but not yet pushed onto an
+    // approver's desk - see $can_submit_for_approval/'submit_for_approval'
+    // in aap_update.php.
+    if ($case['approval_status'] === 'pending' && empty($case['submitted_for_approval'])) {
+        return ['label' => 'Active', 'slug' => 'active'];
     }
     return ['label' => 'Approval', 'slug' => 'pending_approval'];
 }

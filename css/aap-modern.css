@@ -44,6 +44,7 @@
 .aap-pill { display: inline-block; font-size: 12px; font-weight: 600; padding: 3px 12px; border-radius: 12px; color: #fff; vertical-align: middle; white-space: nowrap; }
 .aap-pill-investigating { background: #b8860b; }
 .aap-pill-confirming { background: #f39c12; }
+.aap-pill-active { background: #6c5ce7; }
 .aap-pill-pending_approval { background: #fd7e14; }
 .aap-pill-executing { background: #0dcaf0; color: #04323c; }
 .aap-pill-executing_suspended { background: #b8860b; }

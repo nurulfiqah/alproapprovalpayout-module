@@ -59,12 +59,19 @@ if ($f_status === 'rejected') {
 } elseif ($f_status === 'executing') {
     // Matches aapCaseDisplayStatus's "Execute" branch.
     $status_where = " AND c.case_status = 'open' AND c.approval_status IN ('approved', 'corrected') AND c.execution_status = 'pending'";
-} elseif ($f_status === 'pending_approval') {
-    // Matches aapCaseDisplayStatus's "Approval" branch - whatever
-    // 'open' case is left once confirming/executing are excluded.
+} elseif ($f_status === 'active') {
+    // Matches aapCaseDisplayStatus's "Active" branch - ready (physical step
+    // done, or none needed) but not yet submitted for approval.
     $status_where = " AND c.case_status = 'open'
                 AND NOT (c.physical_confirm_required = 1 AND c.physical_confirm_status IN ('pending', 'tagged'))
-                AND NOT (c.approval_status IN ('approved', 'corrected') AND c.execution_status = 'pending')";
+                AND c.approval_status = 'pending' AND c.submitted_for_approval = 0";
+} elseif ($f_status === 'pending_approval') {
+    // Matches aapCaseDisplayStatus's "Approval" branch - whatever
+    // 'open' case is left once confirming/executing/active are excluded.
+    $status_where = " AND c.case_status = 'open'
+                AND NOT (c.physical_confirm_required = 1 AND c.physical_confirm_status IN ('pending', 'tagged'))
+                AND NOT (c.approval_status IN ('approved', 'corrected') AND c.execution_status = 'pending')
+                AND NOT (c.approval_status = 'pending' AND c.submitted_for_approval = 0)";
 } elseif ($f_status !== '' && in_array($f_status, ['open', 'draft'], true)) {
     $status_where = " AND c.case_status = '" . $conn->real_escape_string($f_status) . "'";
 }
@@ -110,7 +117,7 @@ $filter_outlets = aapFetchCaseOutletOptions($conn, aapScopeWhere($id_user, $aap_
 // ---- Queue-position stat strip - reflects every filter except Case Status
 // itself (see comment above $status_where). ----
 $stat_where = aapScopeWhere($id_user, $aap_dept_ids, $aap_is_admin) . $common_filters;
-$stats = ['draft' => 0, 'open' => 0, 'pending_physical' => 0, 'pending_approval' => 0, 'pending_execution' => 0, 'pending_close' => 0, 'closed_today' => 0];
+$stats = ['draft' => 0, 'open' => 0, 'pending_physical' => 0, 'pending_active' => 0, 'pending_approval' => 0, 'pending_execution' => 0, 'pending_close' => 0, 'closed_today' => 0];
 $res = $conn->query("SELECT case_status, COUNT(*) c FROM aap_cases c WHERE $stat_where GROUP BY case_status");
 while ($res && $row = $res->fetch_assoc()) {
     if ($row['case_status'] === 'open') $stats['open'] = (int)$row['c'];
@@ -118,7 +125,9 @@ while ($res && $row = $res->fetch_assoc()) {
 }
 $res = $conn->query("SELECT COUNT(*) c FROM aap_cases c WHERE $stat_where AND physical_confirm_status IN ('pending','tagged')");
 $stats['pending_physical'] = $res ? (int)$res->fetch_assoc()['c'] : 0;
-$res = $conn->query("SELECT COUNT(*) c FROM aap_cases c WHERE $stat_where AND case_status = 'open' AND physical_confirm_status IN ('not_required','confirmed') AND approval_status = 'pending'");
+$res = $conn->query("SELECT COUNT(*) c FROM aap_cases c WHERE $stat_where AND case_status = 'open' AND physical_confirm_status IN ('not_required','confirmed') AND approval_status = 'pending' AND submitted_for_approval = 0");
+$stats['pending_active'] = $res ? (int)$res->fetch_assoc()['c'] : 0;
+$res = $conn->query("SELECT COUNT(*) c FROM aap_cases c WHERE $stat_where AND case_status = 'open' AND physical_confirm_status IN ('not_required','confirmed') AND approval_status = 'pending' AND submitted_for_approval = 1");
 $stats['pending_approval'] = $res ? (int)$res->fetch_assoc()['c'] : 0;
 $res = $conn->query("SELECT COUNT(*) c FROM aap_cases c WHERE $stat_where AND approval_status IN ('approved','corrected') AND execution_status = 'pending'");
 $stats['pending_execution'] = $res ? (int)$res->fetch_assoc()['c'] : 0;
@@ -227,6 +236,7 @@ $active_tab = (isset($_GET['tab']) && $_GET['tab'] === 'incoming' && $aap_can_se
                         <?php foreach ([
                             'draft' => 'Investigation',
                             'confirming' => 'Verification',
+                            'active' => 'Active',
                             'pending_approval' => 'Approval',
                             'executing' => 'Execute',
                             'closing' => 'Closing in Progress',
@@ -299,6 +309,10 @@ $active_tab = (isset($_GET['tab']) && $_GET['tab'] === 'incoming' && $aap_can_se
             <div class="aap-stat">
                 <h3>Verification</h3>
                 <div class="value" style="color:#f39c12;"><?php echo number_format($stats['pending_physical']); ?></div>
+            </div>
+            <div class="aap-stat">
+                <h3>Active</h3>
+                <div class="value" style="color:#6c5ce7;"><?php echo number_format($stats['pending_active']); ?></div>
             </div>
             <div class="aap-stat">
                 <h3>Approval</h3>

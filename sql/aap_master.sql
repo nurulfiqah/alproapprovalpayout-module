@@ -219,6 +219,16 @@ CREATE TABLE `aap_cases` (
   `value_type` ENUM('cash','points') NULL DEFAULT NULL,
   `recommended_outcome` TEXT NULL,
   `physical_confirm_required` TINYINT(1) NOT NULL DEFAULT 0,
+  -- Whether the requester has actually pushed this case on to the Approval
+  -- gate yet - Open Case moves a Draft into 'open'/Active, but does NOT set
+  -- this on its own any more; the case sits in the Active stage (its own
+  -- stepper step, requester-visible "Submit for Approval" button) until they
+  -- do, and only then are eligible approvers notified. Suspend (Execution's
+  -- own, or Approval's) resets this back to 0 too - the requester has to
+  -- resubmit after fixing things rather than it silently landing back on an
+  -- approver's desk. See aap_update.php's 'open_case'/'submit_for_approval'/
+  -- 'suspend_case'/'suspend_case_approval' actions.
+  `submitted_for_approval` TINYINT(1) NOT NULL DEFAULT 0,
   `physical_confirm_status` ENUM('not_required','pending','tagged','confirmed') NOT NULL DEFAULT 'not_required',
   `physical_confirm_ref` VARCHAR(100) NULL,
   -- Exchange = item re-enters inventory via the warehouse return process
@@ -306,6 +316,13 @@ CREATE TABLE `aap_case_attachments` (
 -- uploaded to, and downloaded from when the viewer can execute the case
 -- (aapCanExecute() - Operations dept or admin), checked independently at
 -- every touchpoint in aap_update.php.
+--
+-- `show_in_fixit`: Execution can flag a specific file to also surface on the
+-- originating Fixit ticket's own page (fixit/index_specific.php's "AAP Case
+-- Progression" widget) - opt-in per file, not a blanket exposure of every
+-- execution attachment. aap_update.php's download_exec gate allows the
+-- download for this specific file once flagged, on top of the normal
+-- $can_execute-only rule.
 -- --------------------------------------------------------
 
 CREATE TABLE `aap_case_execution_attachments` (
@@ -315,6 +332,7 @@ CREATE TABLE `aap_case_execution_attachments` (
   `stored_name` VARCHAR(255) NOT NULL,
   `uploaded_by` INT NOT NULL,
   `timestamp` DATETIME NOT NULL,
+  `show_in_fixit` TINYINT(1) NOT NULL DEFAULT 0,
   KEY `idx_aap_exec_attach_case` (`case_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -356,6 +374,26 @@ CREATE TABLE `aap_case_notes` (
   `created_by` INT NOT NULL,
   `timestamp` DATETIME NOT NULL,
   KEY `idx_aap_notes_case` (`case_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- --------------------------------------------------------
+-- aap_case_reference_links
+-- Named URL references added after case creation (via the "Add New
+-- Evidence" panel on aap_update.php, alongside notes/attachments) - e.g. a
+-- link to an external document, ticket, or resource, when a file upload or
+-- note isn't the right fit. Subject to the same evidence-freeze rule as
+-- notes/attachments (aapCaseEvidenceItemEditable()) - only its own author
+-- can remove it, and only during the phase it was added in.
+-- --------------------------------------------------------
+
+CREATE TABLE `aap_case_reference_links` (
+  `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  `case_id` INT UNSIGNED NOT NULL,
+  `url` TEXT NOT NULL,
+  `label` VARCHAR(150) NOT NULL,
+  `created_by` INT NOT NULL,
+  `timestamp` DATETIME NOT NULL,
+  KEY `idx_aap_ref_links_case` (`case_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- --------------------------------------------------------
