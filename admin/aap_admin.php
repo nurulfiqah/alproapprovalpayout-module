@@ -538,12 +538,15 @@ $aap_base = '../';
                         <option value="">Select Group</option>
                     </select>
                 </div>
-                <div class="aap-modern" id="ct_staff_tier_wrap">
+                <div class="aap-modern" id="ct_staff_tier_wrap" <?php echo $edit_rights['can_edit_level2_group'] ? '' : 'style="display:none;"'; ?>>
                 <table class="alpro-table aap-ct-list-table" id="ct_staff_tier_table" width="100%">
                     <thead><tr><th>Staff</th><th>Tier</th></tr></thead>
                     <tbody id="ct_staff_tier_tbody"></tbody>
                 </table>
                 </div>
+                <?php if (!$edit_rights['can_edit_level2_group']): ?>
+                <div style="padding:8px 12px; background:#f1f3f5; border-radius:6px; font-size:13px; color:#495057;">Staff list hidden - only the department holding Level 2 (or an admin) can view it.</div>
+                <?php endif; ?>
             </div>
         </div>
 
@@ -573,12 +576,15 @@ $aap_base = '../';
                         <option value="">Select Group</option>
                     </select>
                 </div>
-                <div class="aap-modern" id="ct_staff_tier_wrap_lvl3">
+                <div class="aap-modern" id="ct_staff_tier_wrap_lvl3" <?php echo $edit_rights['can_edit_level3_group'] ? '' : 'style="display:none;"'; ?>>
                 <table class="alpro-table aap-ct-list-table" id="ct_staff_tier_table_lvl3" width="100%">
                     <thead><tr><th>Staff</th><th>Tier</th></tr></thead>
                     <tbody id="ct_staff_tier_tbody_lvl3"></tbody>
                 </table>
                 </div>
+                <?php if (!$edit_rights['can_edit_level3_group']): ?>
+                <div style="padding:8px 12px; background:#f1f3f5; border-radius:6px; font-size:13px; color:#495057;">Staff list hidden - only the department holding Level 3 (or an admin) can view it.</div>
+                <?php endif; ?>
             </div>
             <div class="aap-ct-field" style="grid-column: 1 / -1;">
                 <label>Description</label>
@@ -695,8 +701,14 @@ $aap_base = '../';
 <script>
 var AAP_ADMIN = {
     isNew: <?php echo $edit_case_type ? 'false' : 'true'; ?>,
-    approvalTiers: <?php echo json_encode($edit_case_type ? aapFetchCaseTypeStaffTiers($conn, $edit_case_type['id'], 'approval') : []); ?>,
-    exclusionTiers: <?php echo json_encode($edit_case_type ? aapFetchCaseTypeStaffTiers($conn, $edit_case_type['id'], 'exclusion') : []); ?>
+    // Withheld (empty) rather than sent and merely hidden by CSS, for
+    // whoever can't edit that level's roster - e.g. Academy owning Level 1
+    // must not see People Management's actual staff list for Level 3 just
+    // because they can open this Case Type's edit page at all. Matches
+    // can_edit_level2_group/can_edit_level3_group exactly: true for both the
+    // department that actually holds the level AND any full-scope admin.
+    approvalTiers: <?php echo json_encode($edit_case_type && $edit_rights['can_edit_level2_group'] ? aapFetchCaseTypeStaffTiers($conn, $edit_case_type['id'], 'approval') : []); ?>,
+    exclusionTiers: <?php echo json_encode($edit_case_type && $edit_rights['can_edit_level3_group'] ? aapFetchCaseTypeStaffTiers($conn, $edit_case_type['id'], 'exclusion') : []); ?>
 };
 </script>
 <?php $page_js = '../js/aap_admin.js'; include('../aap_footer.php'); ?>

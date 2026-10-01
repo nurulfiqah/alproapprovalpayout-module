@@ -9,6 +9,7 @@ require_once __DIR__ . '/nas_config.php';
 define('AAP_DEPT_OPERATION', 13);          // "Operation" — sole execution authority
 define('AAP_DEPT_DIGITAL_INNOVATION', 16);  // Digital Innovation — module admin (BI/dev team)
 define('AAP_DEPT_CUSTOMER_SUPPORT', 27);    // "Customer Support" — CS-tier approval gate
+define('AAP_DEPT_OUTLET', 1);               // "Outlet" — HOD Approval Only also includes Area Managers here, see aapFetchDepartmentHodStaffIds()
 
 function aapDeptIdsFromCsv($csv) {
     if (empty($csv)) return [];
@@ -411,6 +412,13 @@ function aapCaseTypeSectionDepartment($conn, $case_type_id, $section) {
 // here rather than copied so an HOD change there takes effect immediately).
 // A department can have more than one active row (co-heads/backups) -
 // every one of them qualifies. recycle=1 rows are retired HODs, excluded.
+//
+// Outlet (AAP_DEPT_OUTLET) is a special case: outlets don't really have a
+// single corporate "HOD" the way a head-office department does, so Area
+// Managers (staff.status_semasa = 'Area Manager') are added to the eligible
+// set alongside whatever's in iidas_department for Outlet, not instead of
+// it - any Area Manager can approve an Outlet-raised case, regardless of
+// which specific outlet/region it's from (no per-outlet/region routing).
 function aapFetchDepartmentHodStaffIds($conn, $department_id) {
     $department_id = (int)$department_id;
     if ($department_id <= 0) return [];
@@ -421,7 +429,13 @@ function aapFetchDepartmentHodStaffIds($conn, $department_id) {
     $res = $stmt->get_result();
     while ($row = $res->fetch_assoc()) { $ids[] = (int)$row['hod_id']; }
     $stmt->close();
-    return $ids;
+
+    if ($department_id === AAP_DEPT_OUTLET) {
+        $am_res = $conn->query("SELECT id FROM staff WHERE status_semasa = 'Area Manager' AND recycle != 1");
+        while ($am_res && $row = $am_res->fetch_assoc()) { $ids[] = (int)$row['id']; }
+    }
+
+    return array_values(array_unique($ids));
 }
 
 // Per-Case-Type edit rights, split by section - each is independently
