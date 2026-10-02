@@ -192,6 +192,7 @@ document.addEventListener('DOMContentLoaded', function () {
         function renderGroup(g) {
             return '<div class="aap-group-block" data-group-id="' + g.id + '" style="margin-bottom:16px; border:1px solid #e9ecef; border-radius:10px; overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,0.08);">'
                 + '<div style="background:#eef2f7; border-bottom:1px solid #dbe3ea; display:flex; align-items:stretch;">'
+                + '<button type="button" class="group-copy-btn" title="Copy this Group into a new Group" style="background:transparent; border:none; border-right:1px solid #dbe3ea; color:#6c757d; padding:0 14px; cursor:pointer; font-size:12px; font-weight:600;">Copy</button>'
                 + '<input type="text" class="group-name-input" value="' + esc(g.group_name) + '" readonly title="Group Name is fixed - identify this Group with the Description field instead" style="flex:1; background:transparent; border:none; border-right:1px solid #dbe3ea; color:#2c3e50; font-weight:700; padding:8px 12px; outline:none; cursor:default;">'
                 + '<input type="text" class="group-desc-input" value="' + esc(g.description || '') + '" placeholder="Group Description (e.g. Academy Moodle)" style="flex:2; background:transparent; border:none; color:#495057; padding:8px 12px; outline:none;">'
                 + '<button type="button" class="group-delete-btn" title="Delete this Group" style="background:transparent; border:none; color:#6c757d; padding:0 14px; cursor:pointer; font-size:16px; font-weight:bold;">&times;</button>'
@@ -238,6 +239,7 @@ document.addEventListener('DOMContentLoaded', function () {
             var assignBtn = groupEl.querySelector('.group-assign-btn');
             var descInput = groupEl.querySelector('.group-desc-input');
             var deleteBtn = groupEl.querySelector('.group-delete-btn');
+            var copyBtn = groupEl.querySelector('.group-copy-btn');
 
             loadStaffPool().then(function (staff) {
                 assignStaffSelect.innerHTML = '<option value="">Select Staff</option>' + staff.map(function (s) {
@@ -345,6 +347,18 @@ document.addEventListener('DOMContentLoaded', function () {
             }
             descInput.addEventListener('blur', saveGroupMeta);
             descInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') descInput.blur(); });
+
+            copyBtn.addEventListener('click', guarded(function () {
+                var label = descInput.value.trim() ? (g.group_name + ': ' + descInput.value.trim()) : g.group_name;
+                if (!confirm('Copy "' + label + '" into a new Group?\n\nThe new Group will start with the same RM values, Unlimited settings, and staff assignments - edit it afterwards to make it different.')) return;
+                var body = new URLSearchParams();
+                body.set('action', 'copy_group');
+                body.set('group_id', g.id);
+                return fetch('', { method: 'POST', body: body }).then(function (r) { return r.json(); }).then(function (res) {
+                    if (!res.success) { alert(res.message || 'Could not copy.'); return; }
+                    load();
+                });
+            }));
 
             deleteBtn.addEventListener('click', guarded(function () {
                 var label = descInput.value.trim() ? (g.group_name + ': ' + descInput.value.trim()) : g.group_name;

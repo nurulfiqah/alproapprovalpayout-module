@@ -5,6 +5,16 @@
 .aap-modern, .aap-modern * { font-family: "Inter", sans-serif; box-sizing: border-box; }
 .aap-modern { text-align: left; margin-top: 15px; }
 
+/* Two-way segmented toggle (e.g. Case Details' Customer/Staff switch on
+   aap_add.php) - a single visible choice, not a checkbox/radio pair. */
+.aap-toggle-group { display: inline-flex; border: 1px solid #ced4da; border-radius: 6px; overflow: hidden; }
+.aap-toggle-btn {
+    background: #fff; border: none; padding: 7px 18px; font-size: 13px; font-weight: 600;
+    color: #495057; cursor: pointer;
+}
+.aap-toggle-btn + .aap-toggle-btn { border-left: 1px solid #ced4da; }
+.aap-toggle-btn.active { background: #0d6efd; color: #fff; }
+
 /* Horizontal step progress tracker — shows where a case sits in the SOP
    (Raised -> Verification Reference -> Approval -> Execution -> Closed). */
 .aap-stepper { display: flex; align-items: flex-start; margin-bottom: 0; }

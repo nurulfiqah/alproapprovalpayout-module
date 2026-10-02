@@ -36,6 +36,34 @@ if ($q === '' || strlen($q) < 2) {
     exit;
 }
 
+// 'staff' mode - a case can belong to a staff member instead of a registered
+// customer (e.g. an internal claim/refund), picked via the Customer/Staff
+// toggle on aap_add.php's Case Details card. Reuses the same two form
+// fields/columns (customer_name/customer_membership_id) rather than adding a
+// new DB column - membership_id just holds staff.id as text in that case,
+// same as it holds customer.c_id for a customer.
+if (($_GET['type'] ?? '') === 'staff') {
+    $like = $conn->real_escape_string($q);
+    $res = $conn->query("
+        SELECT id, nama_staff
+        FROM staff
+        WHERE recycle != 1 AND (nama_staff LIKE '%$like%' OR id LIKE '%$like%')
+        ORDER BY nama_staff ASC
+        LIMIT 15
+    ");
+    $rows = [];
+    while ($res && $row = $res->fetch_assoc()) {
+        $rows[] = [
+            'c_id' => $row['id'],
+            'ic' => null,
+            'customer_name' => $row['nama_staff'],
+            'phone' => null,
+        ];
+    }
+    echo json_encode($rows);
+    exit;
+}
+
 $like = $conn->real_escape_string($q);
 $res = $conn->query("
     SELECT c_id, ic, customer_name, phone

@@ -40,6 +40,11 @@ document.addEventListener('DOMContentLoaded', function () {
         var transactionInput = document.getElementById('case-details-transaction-ref');
         var calculatedValueInput = document.getElementById('case-details-calculated-value');
         var recommendedOutcomeInput = document.getElementById('case-details-recommended-outcome');
+        var nameLabel = document.getElementById('customer-name-label');
+        var membershipField = document.getElementById('customer-membership-field');
+        var typeInput = document.getElementById('beneficiary-type-input');
+        var typeCustomerBtn = document.getElementById('beneficiary-type-customer');
+        var typeStaffBtn = document.getElementById('beneficiary-type-staff');
         if (!nameInput || !membershipInput) return;
 
         function lockCustomerFields() {
@@ -50,6 +55,36 @@ document.addEventListener('DOMContentLoaded', function () {
         function unlockCustomerFields() {
             nameInput.readOnly = false;
             membershipInput.readOnly = false;
+        }
+
+        // Customer/Staff toggle - a case normally belongs to a registered
+        // customer, but sometimes it's an internal claim/refund that belongs
+        // to a staff member instead. Switching mode re-labels the Name field
+        // and points the typeahead at the `staff` table instead of
+        // `customer` (see aap_search_customer.php's type=staff branch). For
+        // Staff, the ID field is filled automatically from the picked search
+        // result but hidden - staff are identified by name only on this
+        // form, there's no reason to surface their internal staff.id. The
+        // two underlying form fields/DB columns stay the same either way
+        // (membership_id just holds staff.id as text for a Staff case), and
+        // a hidden-but-rendered-none field is excluded from the browser's
+        // own required-field validation, so the empty display doesn't block
+        // submit once a result is picked.
+        function setBeneficiaryType(type) {
+            typeInput.value = type;
+            var isStaff = type === 'staff';
+            typeCustomerBtn.classList.toggle('active', !isStaff);
+            typeStaffBtn.classList.toggle('active', isStaff);
+            nameLabel.firstChild.textContent = isStaff ? 'Staff Name ' : 'Customer Name ';
+            if (membershipField) membershipField.style.display = isStaff ? 'none' : '';
+            nameInput.value = '';
+            membershipInput.value = '';
+            unlockCustomerFields();
+        }
+
+        if (typeCustomerBtn && typeStaffBtn) {
+            typeCustomerBtn.addEventListener('click', function () { setBeneficiaryType('customer'); });
+            typeStaffBtn.addEventListener('click', function () { setBeneficiaryType('staff'); });
         }
 
         if (refreshBtn) {
@@ -78,7 +113,9 @@ document.addEventListener('DOMContentLoaded', function () {
             }
 
             function search(q) {
-                fetch('aap_search_customer.php?q=' + encodeURIComponent(q))
+                var url = 'aap_search_customer.php?q=' + encodeURIComponent(q)
+                    + (typeInput && typeInput.value === 'staff' ? '&type=staff' : '');
+                fetch(url)
                     .then(function (r) { return r.json(); })
                     .then(function (rows) { renderResults(rows); })
                     .catch(function () { hideResults(); });
@@ -91,7 +128,9 @@ document.addEventListener('DOMContentLoaded', function () {
                     var li = document.createElement('li');
                     li.style.cursor = 'pointer';
                     li.style.display = 'block';
-                    var line = (row.ic || '—') + ': ' + row.customer_name + ', ID: ' + (row.c_id || '—');
+                    var line = typeInput && typeInput.value === 'staff'
+                        ? row.customer_name
+                        : (row.ic ? (row.ic + ': ' + row.customer_name + ', ID: ' + (row.c_id || '—')) : (row.customer_name + ', ID: ' + (row.c_id || '—')));
                     li.innerHTML = escapeHtml(line);
                     // Preventing the mousedown's default action stops the
                     // browser from blurring the input the instant the mouse

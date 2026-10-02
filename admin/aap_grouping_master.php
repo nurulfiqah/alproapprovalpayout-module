@@ -343,6 +343,64 @@ if (isset($_POST['action']) && $_POST['action'] === 'delete_group' && $_SERVER['
     exit;
 }
 
+// ---- AJAX: duplicate an existing Group within the same department - new
+// Group gets the next auto-numbered name (same rule as add_group) but
+// carries over the source Group's Description, every tier's RM Value/
+// Unlimited state, and every manual staff assignment (mapped across by tier
+// NAME, since both Groups share the same fixed 6-tier set in the same
+// order) - lets an admin build "similar but tweaked" Groups (e.g. Group 2
+// mostly matching Group 1) without re-entering everything by hand. ----
+if (isset($_POST['action']) && $_POST['action'] === 'copy_group' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    ob_end_clean();
+    header('Content-Type: application/json');
+    $source_group_id = (int)($_POST['group_id'] ?? 0);
+    if ($source_group_id <= 0) {
+        echo json_encode(['success' => false, 'message' => 'Invalid group.']);
+        exit;
+    }
+    $source_group = $conn->query("SELECT department_id, group_name, description FROM aap_approval_unit_tier_groups WHERE id = " . $source_group_id)->fetch_assoc();
+    if (!$source_group) {
+        echo json_encode(['success' => false, 'message' => 'Invalid group.']);
+        exit;
+    }
+    $dept_id = (int)$source_group['department_id'];
+    if (!aapDeptInScope($dept_id, $aap_dept_ids, $aap_can_manage_all_depts)) {
+        echo json_encode(['success' => false, 'message' => 'You do not manage this department.']);
+        exit;
+    }
+
+    $source_tiers = $conn->query("SELECT id, tier_name, tier_value FROM aap_approval_unit_tiers WHERE group_id = " . $source_group_id . " ORDER BY sort_order ASC, id ASC")->fetch_all(MYSQLI_ASSOC);
+
+    $count_res = $conn->query("SELECT COUNT(*) c FROM aap_approval_unit_tier_groups WHERE department_id = " . $dept_id);
+    $group_name = 'Group ' . ((int)$count_res->fetch_assoc()['c'] + 1);
+    $description = $source_group['description'];
+    $now = date('Y-m-d H:i:s');
+    $sort_res = $conn->query("SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM aap_approval_unit_tier_groups WHERE department_id = " . $dept_id);
+    $sort_order = (int)$sort_res->fetch_assoc()['n'];
+
+    $stmt = $conn->prepare("INSERT INTO aap_approval_unit_tier_groups (department_id, group_name, description, sort_order, updated_by, timestamp) VALUES (?, ?, ?, ?, ?, ?)");
+    $stmt->bind_param("issiis", $dept_id, $group_name, $description, $sort_order, $id_user, $now);
+    $stmt->execute();
+    $new_group_id = $stmt->insert_id;
+    $stmt->close();
+
+    $tier_stmt = $conn->prepare("INSERT INTO aap_approval_unit_tiers (department_id, group_id, tier_name, tier_value, sort_order, updated_by, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)");
+    $staff_stmt = $conn->prepare("INSERT INTO aap_approval_unit_tier_staff (tier_id, staff_id, created_by, timestamp) SELECT ?, staff_id, ?, ? FROM aap_approval_unit_tier_staff WHERE tier_id = ?");
+    foreach ($source_tiers as $i => $t) {
+        $t_sort = $i + 1;
+        $tier_stmt->bind_param("iisdiis", $dept_id, $new_group_id, $t['tier_name'], $t['tier_value'], $t_sort, $id_user, $now);
+        $tier_stmt->execute();
+        $new_tier_id = $tier_stmt->insert_id;
+        $staff_stmt->bind_param("iisi", $new_tier_id, $id_user, $now, $t['id']);
+        $staff_stmt->execute();
+    }
+    $tier_stmt->close();
+    $staff_stmt->close();
+
+    echo json_encode(['success' => true, 'groups' => aapFetchDepartmentGroups($conn, $dept_id)]);
+    exit;
+}
+
 // ---- AJAX: staff pool for the "Assign Staff" picker in one department. ----
 if (isset($_GET['action']) && $_GET['action'] === 'get_dept_staff_pool' && $_SERVER['REQUEST_METHOD'] === 'GET') {
     ob_end_clean();

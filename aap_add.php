@@ -65,17 +65,6 @@ $fixit_attachments = aapFetchFixitAttachments($conn, $prefill_fixit_id);
 // in its own card above the form instead of being duplicated in here.
 $default_evidence_note = isset($_POST['evidence_note']) ? $_POST['evidence_note'] : '';
 
-// Every active Case Type, regardless of department - the Department picker
-// below filters this list client-side (data-department-id on each option),
-// since each department now has its own Case Type list.
-$case_types = aapFetchCaseTypes($conn);
-if (empty($case_types)) {
-    $msg = "No active Case Types are configured yet. Ask an admin to set up the Case Type Registry first.";
-    $msg_type = "alpro-warn";
-}
-
-$departments = aapFetchDepartmentsWithCaseTypes($conn);
-
 // The Department filter defaults to (and is locked to) the originating
 // Fixit report's own department, not the requester's own - a case raised
 // from a Fixit ticket lodged against Academy must pick from Academy's Case
@@ -84,6 +73,18 @@ $departments = aapFetchDepartmentsWithCaseTypes($conn);
 // visit here has a fixit record (aap_add.php redirects to index.php
 // otherwise, see above), so this is always set.
 $prefill_dept_id = $fixit_record['department_id'] ?? null;
+
+// Fetched pre-filtered to that one department, not just hidden client-side -
+// other departments' Case Type names/descriptions must never reach the page
+// at all, since the Department picker is only disabled (read-only), not a
+// real access boundary, and anyone can read the page source.
+$case_types = aapFetchCaseTypes($conn, false, $prefill_dept_id);
+if (empty($case_types)) {
+    $msg = "No active Case Types are configured yet for this department. Ask an admin to set up the Case Type Registry first.";
+    $msg_type = "alpro-warn";
+}
+
+$departments = aapFetchDepartmentsWithCaseTypes($conn);
 
 if (isset($_POST['raise_case'])) {
     $case_type_id = (int)$_POST['case_type_id'];
@@ -291,17 +292,26 @@ if (isset($_POST['raise_case'])) {
                         <button type="button" id="case-details-refresh-btn" class="alpro-btn alpro-btn-grey" title="Clear every field in this section" style="padding:4px 12px; font-size:12px;"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
                     </div>
 
+                    <div class="alpro-field" style="margin-bottom:14px;">
+                        <label>This case belongs to</label>
+                        <div class="aap-toggle-group" role="group">
+                            <button type="button" class="aap-toggle-btn active" id="beneficiary-type-customer" data-type="customer">Customer</button>
+                            <button type="button" class="aap-toggle-btn" id="beneficiary-type-staff" data-type="staff">Staff</button>
+                        </div>
+                        <input type="hidden" id="beneficiary-type-input" value="customer">
+                    </div>
+
                     <div class="alpro-grid">
                         <div class="alpro-field" style="position:relative;">
-                            <label>Customer Name <span class="aap-req">*</span>
-                                <span class="aap-admin-info-icon">i<span class="aap-admin-tooltip">Type a name, IC, or membership ID here or in Membership ID to search. Picking a result fills both fields and locks them - use Refresh above to clear this whole section and search again.</span></span>
+                            <label id="customer-name-label">Customer Name <span class="aap-req">*</span>
+                                <span class="aap-admin-info-icon">i<span class="aap-admin-tooltip">Type a name, IC, or membership/staff ID here or in the ID field to search. Picking a result fills both fields and locks them - use Refresh above to clear this whole section and search again.</span></span>
                             </label>
                             <input class="alpro-input" type="text" name="customer_name" id="customer-name-input" autocomplete="off" required>
                             <ul id="customer-name-results" class="aap-attach-list" style="display:none; position:absolute; z-index:20; left:0; right:0; margin-top:4px; max-height:260px; overflow-y:auto; box-shadow:0 8px 20px rgba(0,0,0,.1);"></ul>
                         </div>
 
-                        <div class="alpro-field" style="position:relative;">
-                            <label>Membership ID <span class="aap-req">*</span></label>
+                        <div class="alpro-field" id="customer-membership-field" style="position:relative;">
+                            <label id="customer-membership-label">Membership ID <span class="aap-req">*</span></label>
                             <input class="alpro-input" type="text" name="customer_membership_id" id="customer-membership-input" autocomplete="off" inputmode="numeric" pattern="[0-9]*" required>
                             <ul id="customer-membership-results" class="aap-attach-list" style="display:none; position:absolute; z-index:20; left:0; right:0; margin-top:4px; max-height:260px; overflow-y:auto; box-shadow:0 8px 20px rgba(0,0,0,.1);"></ul>
                         </div>

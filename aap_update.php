@@ -925,8 +925,7 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
 
                     <div class="aap-form-grid">
                         <div class="alpro-field"><label>Customer Name</label><div><?php echo htmlspecialchars($case['customer_name'] ?: '—'); ?></div></div>
-                        <div class="alpro-field"><label>Membership ID</label><div><?php echo htmlspecialchars($case['customer_membership_id'] ?: '—'); ?></div></div>
-                        <div class="alpro-field"><label>Transaction No</label><div><?php echo htmlspecialchars($case['transaction_ref'] ?: '—'); ?></div></div>
+                        <div class="alpro-field aap-span-2"><label>Transaction No</label><div><?php echo htmlspecialchars($case['transaction_ref'] ?: '—'); ?></div></div>
                     </div>
 
                     <div class="aap-form-grid">
@@ -967,11 +966,13 @@ $approval_pill = 'aap-pill-' . $approval_status_display['slug'];
                             <label>Customer Name</label>
                             <input class="alpro-input" type="text" name="customer_name" value="<?php echo htmlspecialchars($case['customer_name'] ?? ''); ?>" readonly>
                         </div>
-                        <div class="alpro-field">
-                            <label>Membership ID</label>
-                            <input class="alpro-input" type="text" name="customer_membership_id" id="edit-customer-membership-input" value="<?php echo htmlspecialchars($case['customer_membership_id'] ?? ''); ?>" inputmode="numeric" pattern="[0-9]*" readonly>
-                        </div>
-                        <div class="alpro-field">
+                        <!-- Not shown - Membership ID adds no value on screen (it's
+                        either a customer.c_id or, for a Staff case, a staff.id - see
+                        aap_add.php's Customer/Staff toggle). Kept in the DOM, hidden,
+                        purely so Save Changes keeps round-tripping the stored value
+                        via aapSaveCaseEditFields() instead of blanking it out. -->
+                        <input type="hidden" name="customer_membership_id" id="edit-customer-membership-input" value="<?php echo htmlspecialchars($case['customer_membership_id'] ?? ''); ?>">
+                        <div class="alpro-field aap-span-2">
                             <label>Transaction No</label>
                             <input class="alpro-input" type="text" name="transaction_ref" id="edit-transaction-ref-input" value="<?php echo htmlspecialchars($case['transaction_ref'] ?? ''); ?>" inputmode="numeric" pattern="[0-9]*">
                         </div>
